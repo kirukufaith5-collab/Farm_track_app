@@ -1,122 +1,81 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+import React, { useState, useEffect } from 'react';
+import { useJsApiLoader } from '@react-google-maps/api';
+import Sidebar from "./components/Sidebar.jsx";
+import MapView from "./components/MapView.jsx";
+import useGPS from "./hooks/ useGPS.jsx";
 
-function App() {
-  const [count, setCount] = useState(0)
+// 1. Import your scoped module styles here
+import styles from "./App.module.css"; 
+
+// Keep 'geometry', but leave 'drawing' completely out of it!
+const libraries = ['geometry', 'places']; 
+
+
+export default function App() {
+  const { isLoaded, loadError } = useJsApiLoader({
+    id: 'google-map-script',
+    googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY,
+    libraries,
+  });
+
+  const [map, setMap] = useState(null);
+  const [fields, setFields] = useState([]);
+  const [selectedField, setSelectedField] = useState(null);
+
+  const { currentLocation, trackLocation } = useGPS(map);
+
+  useEffect(() => {
+    if (map) trackLocation();
+  }, [map, trackLocation]);
+
+  const handlePolygonComplete = (geoData) => {
+    const freshField = {
+      id: Date.now(),
+      coordinates: geoData.coordinates,
+      area: geoData.area,
+      crop: 'Unassigned',
+      notes: '',
+    };
+    setSelectedField(freshField);
+  };
+
+  const handleSaveField = (finalizedField) => {
+    setFields((prev) => {
+      const fieldExists = prev.some((f) => f.id === finalizedField.id);
+      if (fieldExists) {
+        return prev.map((f) => (f.id === finalizedField.id ? finalizedField : f));
+      }
+      return [...prev, finalizedField];
+    });
+    setSelectedField(null);
+  };
+
+  const handleDeleteField = (id) => {
+    setFields((prev) => prev.filter((field) => field.id !== id));
+    if (selectedField?.id === id) setSelectedField(null);
+  };
+
+  // 2. Updated Fallback UI returns using CSS modules classes
+  if (loadError) return <div className={styles.errorMessage}>Maps integration failed to render. Check credentials.</div>;
+  if (!isLoaded) return <div className={styles.statusMessage}>Initializing Geospatial Systems...</div>;
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
-
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+   /* 🚨 CRITICAL: Ensure className uses styles.dashboardContainer exactly like this 🚨 */
+    <div className={styles.dashboardContainer}>
+      <Sidebar 
+        onLocateClick={trackLocation}
+        selectedField={selectedField}
+        fields={fields}
+        onSaveField={handleSaveField}
+        onDeleteField={handleDeleteField}
+      />
+      <MapView 
+        currentLocation={currentLocation}
+        fields={fields}
+        onMapLoad={setMap}
+        onPolygonComplete={handlePolygonComplete}
+        onSelectField={setSelectedField}
+      />
+    </div>
+  );
 }
-
-export default App
