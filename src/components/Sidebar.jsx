@@ -1,4 +1,55 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
+
+// ── Design tokens ────────────────────────────────────────────────────────
+// A working field-ops palette: warm parchment instead of clinical white,
+// loam brown for text, sage for the primary action color (echoes crops/land
+// rather than a generic SaaS green), clay for delete/danger states.
+const tokens = {
+  bg: '#FAF7F2',
+  bgCard: '#FFFFFF',
+  ink: '#2B2420',
+  inkSoft: '#8A8175',
+  hairline: '#E6E0D6',
+  sage: '#5B7B5A',
+  sageSoft: '#EEF2EC',
+  clay: '#B5654A',
+  claySoft: '#FBEEEA',
+  amber: '#C18A3D',
+};
+
+// ── Crop icon lookup ────────────────────────────────────────────────────
+// Since crop is still free-text (not a fixed category list), this matches
+// on keywords found anywhere in what the manager typed, case-insensitive.
+// Order matters: more specific terms are checked before generic ones.
+// Falls back to a neutral plot icon for anything unrecognized, and a
+// dashed-circle for plots that haven't been assigned a crop yet.
+const CROP_ICON_MAP = [
+  { keywords: ['maize', 'corn'], icon: '🌽' },
+  { keywords: ['coffee'], icon: '☕' },
+  { keywords: ['tea'], icon: '🍃' },
+  { keywords: ['avocado'], icon: '🥑' },
+  { keywords: ['banana'], icon: '🍌' },
+  { keywords: ['bean'], icon: '🫘' },
+  { keywords: ['rice'], icon: '🌾' },
+  { keywords: ['wheat', 'barley'], icon: '🌾' },
+  { keywords: ['potato'], icon: '🥔' },
+  { keywords: ['tomato'], icon: '🍅' },
+  { keywords: ['mango'], icon: '🥭' },
+  { keywords: ['flower', 'rose'], icon: '🌷' },
+  { keywords: ['cattle', 'livestock', 'dairy', 'cow'], icon: '🐄' },
+  { keywords: ['poultry', 'chicken'], icon: '🐔' },
+  { keywords: ['fallow', 'storage', 'shed', 'building'], icon: '🏚️' },
+  { keywords: ['orchard', 'fruit'], icon: '🌳' },
+];
+
+function getCropIcon(crop) {
+  if (!crop || crop === 'Unassigned') return '◌';
+  const lower = crop.toLowerCase();
+  const match = CROP_ICON_MAP.find(({ keywords }) =>
+    keywords.some((kw) => lower.includes(kw))
+  );
+  return match ? match.icon : '🌱'; // generic plant icon for unrecognized crop names
+}
 
 export default function Sidebar({
   onLocateClick,
@@ -6,9 +57,21 @@ export default function Sidebar({
   fields,
   onSaveField,
   onDeleteField,
-  saving,       // true while a Firestore write is in progress
-  dbLoading,    // true while initial fields are being fetched
+  saving,
+  dbLoading,
 }) {
+  // Tracks the crop input live (separate from form submission) purely so the
+  // icon preview next to the field can update as the manager types, instead
+  // of only showing the icon after saving. Resets whenever a different plot
+  // is selected for editing.
+  const [cropDraft, setCropDraft] = useState('');
+
+  useEffect(() => {
+    if (selectedField) {
+      setCropDraft(selectedField.crop !== 'Unassigned' ? selectedField.crop : '');
+    }
+  }, [selectedField?.id, selectedField]);
+
   const handleSubmit = (e) => {
     e.preventDefault();
     const formData = new FormData(e.target);
@@ -21,247 +84,375 @@ export default function Sidebar({
 
   return (
     <div style={{
-      width: '360px',
+      width: '380px',
       height: '100vh',
-      backgroundColor: '#ffffff',
-      borderRight: '1px solid #e2e8f0',
-      boxShadow: '0 4px 20px rgba(0,0,0,0.03)',
-      padding: '28px 24px',
-      boxSizing: 'border-box',
+      backgroundColor: tokens.bg,
+      borderRight: `1px solid ${tokens.hairline}`,
       display: 'flex',
       flexDirection: 'column',
-      gap: '24px',
       zIndex: 5,
-      fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-      overflowY: 'auto',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
+      overflow: 'hidden',
     }}>
 
-      {/* Branding Header */}
-      <div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
-          <span style={{ fontSize: '24px' }}>🌱</span>
-          <h1 style={{ margin: 0, fontSize: '22px', fontWeight: '800', color: '#0f172a', letterSpacing: '-0.5px' }}>
+      {/* ── Header strip ───────────────────────────────────────────────
+          A subtle horizontal grain texture grounds the header in "soil"
+          without being literal or decorative-for-its-own-sake. */}
+      <div style={{
+        padding: '28px 28px 22px',
+        background: `
+          repeating-linear-gradient(
+            0deg,
+            rgba(91,123,90,0.035) 0px,
+            rgba(91,123,90,0.035) 1px,
+            transparent 1px,
+            transparent 4px
+          ),
+          linear-gradient(180deg, #F3EEE3 0%, ${tokens.bg} 100%)
+        `,
+        borderBottom: `1px solid ${tokens.hairline}`,
+        flexShrink: 0,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: '10px', marginBottom: '4px' }}>
+          <h1 style={{
+            margin: 0,
+            fontSize: '21px',
+            fontWeight: '700',
+            color: tokens.ink,
+            letterSpacing: '-0.3px',
+          }}>
             FarmTrack
           </h1>
+          <span style={{
+            fontSize: '10px',
+            fontWeight: '700',
+            letterSpacing: '0.06em',
+            textTransform: 'uppercase',
+            color: tokens.sage,
+            backgroundColor: tokens.sageSoft,
+            padding: '2px 7px',
+            borderRadius: '4px',
+          }}>
+            Field Ops
+          </span>
         </div>
-        <p style={{ margin: 0, fontSize: '13px', color: '#64748b', lineHeight: '1.5' }}>
-          Plot farm parcels, register crops, and manage land registries across your team.
+        <p style={{ margin: 0, fontSize: '12.5px', color: tokens.inkSoft, lineHeight: '1.5' }}>
+          Plot parcels, register crops, manage land records.
         </p>
       </div>
 
-      {/* GPS Button */}
-      <button
-        onClick={onLocateClick}
-        style={{
-          width: '100%',
-          backgroundColor: '#0f172a',
-          color: '#ffffff',
-          border: 'none',
-          padding: '14px 16px',
-          borderRadius: '10px',
-          fontSize: '14px',
-          fontWeight: '600',
-          cursor: 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: '8px',
-          boxShadow: '0 4px 12px rgba(15,23,42,0.15)',
-          transition: 'all 0.2s ease',
-        }}
-        onMouseOver={(e) => {
-          e.currentTarget.style.backgroundColor = '#1e293b';
-          e.currentTarget.style.transform = 'translateY(-1px)';
-        }}
-        onMouseOut={(e) => {
-          e.currentTarget.style.backgroundColor = '#0f172a';
-          e.currentTarget.style.transform = 'translateY(0)';
-        }}
-      >
-        📍 Locate Me via GPS
-      </button>
+      {/* ── Scrollable body ─────────────────────────────────────────── */}
+      <div style={{
+        flex: 1,
+        overflowY: 'auto',
+        padding: '20px 28px 28px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '20px',
+      }}>
 
-      <hr style={{ border: 'none', borderTop: '1px solid #f1f5f9', margin: 0 }} />
+        {/* GPS button */}
+        <button
+          onClick={onLocateClick}
+          style={{
+            width: '100%',
+            backgroundColor: tokens.ink,
+            color: '#FFFFFF',
+            border: 'none',
+            padding: '13px 16px',
+            borderRadius: '8px',
+            fontSize: '13.5px',
+            fontWeight: '600',
+            letterSpacing: '0.01em',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '8px',
+            transition: 'opacity 0.15s ease',
+          }}
+          onMouseOver={(e) => { e.currentTarget.style.opacity = '0.85'; }}
+          onMouseOut={(e) => { e.currentTarget.style.opacity = '1'; }}
+        >
+          <span aria-hidden="true">⌖</span> Locate Me via GPS
+        </button>
 
-      {/* Plot Editor — shown after a polygon is drawn */}
-      {selectedField && (
-        <div style={{
-          backgroundColor: '#f8fafc',
-          border: '1px solid #e2e8f0',
-          borderRadius: '12px',
-          padding: '20px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '16px',
-        }}>
-          <h3 style={{ margin: 0, fontSize: '14px', fontWeight: '700', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '6px' }}>
-            ✏️ {selectedField.id ? 'Edit Plot Details' : 'Register New Plot'}
-          </h3>
-
-          {/* Area display */}
-          <div style={{ backgroundColor: '#ffffff', padding: '10px 14px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
-            <span style={{ fontSize: '12px', color: '#64748b' }}>Total Land Size</span>
-            <div style={{ fontSize: '16px', fontWeight: '700', color: '#10b981', marginTop: '2px' }}>
-              {selectedField.area}
+        {/* ── Plot editor ──────────────────────────────────────────── */}
+        {selectedField && (
+          <div style={{
+            backgroundColor: tokens.bgCard,
+            border: `1px solid ${tokens.hairline}`,
+            borderRadius: '10px',
+            padding: '18px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '14px',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{
+                  width: '26px',
+                  height: '26px',
+                  borderRadius: '7px',
+                  backgroundColor: tokens.sageSoft,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '13px',
+                  flexShrink: 0,
+                }}>
+                  {getCropIcon(cropDraft)}
+                </span>
+                <h3 style={{
+                  margin: 0,
+                  fontSize: '11px',
+                  fontWeight: '700',
+                  letterSpacing: '0.06em',
+                  textTransform: 'uppercase',
+                  color: tokens.inkSoft,
+                }}>
+                  {selectedField.id ? 'Edit Plot' : 'Register Plot'}
+                </h3>
+              </div>
+              <span style={{
+                fontSize: '13px',
+                fontWeight: '700',
+                color: tokens.sage,
+                fontVariantNumeric: 'tabular-nums',
+              }}>
+                {selectedField.area}
+              </span>
             </div>
-          </div>
 
-          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-              <label style={{ fontSize: '12px', fontWeight: '600', color: '#475569' }}>Crop Registration</label>
-              <input
-                name="crop"
-                type="text"
-                defaultValue={selectedField.crop !== 'Unassigned' ? selectedField.crop : ''}
-                placeholder="e.g. Maize, Coffee, Avocado"
-                style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '14px', outline: 'none' }}
-                onFocus={(e) => e.target.style.borderColor = '#3b82f6'}
-                onBlur={(e) => e.target.style.borderColor = '#cbd5e1'}
-              />
-            </div>
+            <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                <label style={{ fontSize: '11.5px', fontWeight: '600', color: tokens.inkSoft }}>Crop</label>
+                <input
+                  name="crop"
+                  type="text"
+                  value={cropDraft}
+                  onChange={(e) => setCropDraft(e.target.value)}
+                  placeholder="e.g. Maize, Coffee, Avocado"
+                  style={{
+                    padding: '10px 12px',
+                    borderRadius: '7px',
+                    border: `1px solid ${tokens.hairline}`,
+                    backgroundColor: tokens.bg,
+                    fontSize: '13.5px',
+                    color: tokens.ink,
+                    outline: 'none',
+                    transition: 'border-color 0.15s ease',
+                  }}
+                  onFocus={(e) => { e.target.style.borderColor = tokens.sage; }}
+                  onBlur={(e) => { e.target.style.borderColor = tokens.hairline; }}
+                />
+              </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-              <label style={{ fontSize: '12px', fontWeight: '600', color: '#475569' }}>Field Notes</label>
-              <textarea
-                name="notes"
-                defaultValue={selectedField.notes}
-                placeholder="Soil treatments, harvest expectations..."
-                rows={3}
-                style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '14px', resize: 'none', outline: 'none', fontFamily: 'inherit' }}
-                onFocus={(e) => e.target.style.borderColor = '#3b82f6'}
-                onBlur={(e) => e.target.style.borderColor = '#cbd5e1'}
-              />
-            </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                <label style={{ fontSize: '11.5px', fontWeight: '600', color: tokens.inkSoft }}>Notes</label>
+                <textarea
+                  name="notes"
+                  defaultValue={selectedField.notes}
+                  placeholder="Soil treatments, harvest expectations..."
+                  rows={3}
+                  style={{
+                    padding: '10px 12px',
+                    borderRadius: '7px',
+                    border: `1px solid ${tokens.hairline}`,
+                    backgroundColor: tokens.bg,
+                    fontSize: '13.5px',
+                    color: tokens.ink,
+                    resize: 'none',
+                    outline: 'none',
+                    fontFamily: 'inherit',
+                    transition: 'border-color 0.15s ease',
+                  }}
+                  onFocus={(e) => { e.target.style.borderColor = tokens.sage; }}
+                  onBlur={(e) => { e.target.style.borderColor = tokens.hairline; }}
+                />
+              </div>
 
-            <div style={{ display: 'flex', gap: '10px', marginTop: '4px' }}>
-              <button
-                type="submit"
-                disabled={saving}
-                style={{
-                  flex: 1,
-                  backgroundColor: saving ? '#6ee7b7' : '#10b981',
-                  color: 'white',
-                  border: 'none',
-                  padding: '11px',
-                  borderRadius: '8px',
-                  fontWeight: '600',
-                  cursor: saving ? 'not-allowed' : 'pointer',
-                  boxShadow: '0 2px 8px rgba(16,185,129,0.2)',
-                  transition: 'background-color 0.2s',
-                }}
-              >
-                {saving ? 'Saving...' : 'Save to Database'}
-              </button>
-
-              {/* Only show delete for existing (already-saved) fields */}
-              {selectedField.id && (
+              <div style={{ display: 'flex', gap: '8px', marginTop: '2px' }}>
                 <button
-                  type="button"
-                  onClick={() => onDeleteField(selectedField.id)}
-                  style={{ backgroundColor: '#fee2e2', color: '#ef4444', border: 'none', padding: '11px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: '600' }}
+                  type="submit"
+                  disabled={saving}
+                  style={{
+                    flex: 1,
+                    backgroundColor: saving ? '#9DB59C' : tokens.sage,
+                    color: '#FFFFFF',
+                    border: 'none',
+                    padding: '10px',
+                    borderRadius: '7px',
+                    fontSize: '13px',
+                    fontWeight: '600',
+                    cursor: saving ? 'not-allowed' : 'pointer',
+                    transition: 'background-color 0.15s ease',
+                  }}
                 >
-                  🗑
+                  {saving ? 'Saving…' : 'Save to Database'}
                 </button>
-              )}
-            </div>
-          </form>
-        </div>
-      )}
 
-      {/* Logged Parcels List */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '14px' }}>
-        <h3 style={{ margin: 0, fontSize: '15px', fontWeight: '700', color: '#1e293b', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span>Logged Parcels</span>
-          <span style={{ backgroundColor: '#f1f5f9', color: '#475569', padding: '4px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: '600' }}>
-            {dbLoading ? '...' : fields.length}
-          </span>
-        </h3>
-
-        {/* Firestore loading skeleton */}
-        {dbLoading ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {[1, 2, 3].map((i) => (
-              <div key={i} style={{ height: '64px', borderRadius: '10px', backgroundColor: '#f1f5f9', animation: 'pulse 1.5s infinite' }} />
-            ))}
-          </div>
-        ) : fields.length === 0 ? (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '40px 20px', border: '2px dashed #e2e8f0', borderRadius: '12px', backgroundColor: '#fafafa' }}>
-            <span style={{ fontSize: '24px', marginBottom: '8px' }}>🚜</span>
-            <p style={{ margin: 0, fontSize: '13px', color: '#94a3b8', textAlign: 'center', lineHeight: '1.4' }}>
-              No plots saved yet. Click on the map to start drawing a boundary.
-            </p>
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {fields.map((field) => (
-              <div
-                key={field.id}
-                style={{
-                  padding: '16px',
-                  border: '1px solid #e2e8f0',
-                  borderRadius: '10px',
-                  backgroundColor: '#ffffff',
-                  cursor: 'pointer',
-                  boxShadow: '0 2px 4px rgba(0,0,0,0.01)',
-                  transition: 'all 0.2s ease',
-                }}
-                onClick={() => onSaveField(field)}
-                onMouseOver={(e) => {
-                  e.currentTarget.style.borderColor = '#10b981';
-                  e.currentTarget.style.boxShadow = '0 4px 12px rgba(0,0,0,0.05)';
-                }}
-                onMouseOut={(e) => {
-                  e.currentTarget.style.borderColor = '#e2e8f0';
-                  e.currentTarget.style.boxShadow = '0 2px 4px rgba(0,0,0,0.01)';
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                  <strong style={{ fontSize: '14px', color: '#0f172a', fontWeight: '600' }}>{field.crop}</strong>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span style={{ fontSize: '12px', color: '#10b981', backgroundColor: '#ecfdf5', padding: '2px 8px', borderRadius: '6px', fontWeight: '600' }}>
-                      {field.area}
-                    </span>
-                    {/* Quick-delete button on the card itself.
-                        e.stopPropagation() is essential here — without it, the click
-                        would bubble up to the parent card's onClick and open the edit
-                        form instead of (or as well as) deleting. */}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDeleteField(field.id);
-                      }}
-                      title="Delete this field"
-                      style={{
-                        backgroundColor: 'transparent',
-                        color: '#ef4444',
-                        border: 'none',
-                        padding: '4px',
-                        borderRadius: '6px',
-                        cursor: 'pointer',
-                        fontSize: '14px',
-                        lineHeight: 1,
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        transition: 'background-color 0.15s',
-                      }}
-                      onMouseOver={(e) => { e.currentTarget.style.backgroundColor = '#fee2e2'; }}
-                      onMouseOut={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
-                    >
-                      🗑
-                    </button>
-                  </div>
-                </div>
-                {field.notes && (
-                  <p style={{ margin: 0, fontSize: '12px', color: '#64748b', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
-                    {field.notes}
-                  </p>
+                {selectedField.id && (
+                  <button
+                    type="button"
+                    onClick={() => onDeleteField(selectedField.id)}
+                    title="Delete this plot"
+                    style={{
+                      backgroundColor: tokens.claySoft,
+                      color: tokens.clay,
+                      border: 'none',
+                      padding: '10px 13px',
+                      borderRadius: '7px',
+                      cursor: 'pointer',
+                      fontSize: '13px',
+                      fontWeight: '600',
+                    }}
+                  >
+                    Remove
+                  </button>
                 )}
               </div>
-            ))}
+            </form>
           </div>
         )}
+
+        {/* ── Logged parcels — ledger style ───────────────────────── */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <h3 style={{
+              margin: 0,
+              fontSize: '11px',
+              fontWeight: '700',
+              letterSpacing: '0.06em',
+              textTransform: 'uppercase',
+              color: tokens.inkSoft,
+            }}>
+              Logged Parcels
+            </h3>
+            <span style={{ fontSize: '12px', color: tokens.inkSoft, fontVariantNumeric: 'tabular-nums' }}>
+              {dbLoading ? '···' : `${fields.length} total`}
+            </span>
+          </div>
+
+          {dbLoading ? (
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              {[1, 2, 3].map((i) => (
+                <div key={i} style={{
+                  height: '50px',
+                  borderBottom: `1px solid ${tokens.hairline}`,
+                  background: `linear-gradient(90deg, transparent, ${tokens.hairline}55, transparent)`,
+                  backgroundSize: '200% 100%',
+                  animation: 'shimmer 1.4s infinite',
+                }} />
+              ))}
+              <style>{`@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }`}</style>
+            </div>
+          ) : fields.length === 0 ? (
+            <div style={{
+              padding: '32px 16px',
+              border: `1.5px dashed ${tokens.hairline}`,
+              borderRadius: '10px',
+              textAlign: 'center',
+            }}>
+              <p style={{ margin: 0, fontSize: '12.5px', color: tokens.inkSoft, lineHeight: '1.5' }}>
+                No plots logged yet.<br />Click the map to start drawing a boundary.
+              </p>
+            </div>
+          ) : (
+            <div>
+              {fields.map((field) => (
+                <div
+                  key={field.id}
+                  onClick={() => onSaveField(field)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px',
+                    padding: '11px 4px',
+                    borderBottom: `1px solid ${tokens.hairline}`,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {/* Crop icon badge — gives instant visual recognition of what's
+                      planted without reading text, matched from free-text input */}
+                  <span style={{
+                    width: '30px',
+                    height: '30px',
+                    borderRadius: '8px',
+                    backgroundColor: field.crop === 'Unassigned' ? tokens.bg : tokens.sageSoft,
+                    border: field.crop === 'Unassigned' ? `1px dashed ${tokens.hairline}` : 'none',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: '15px',
+                    flexShrink: 0,
+                  }}>
+                    {getCropIcon(field.crop)}
+                  </span>
+
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: '13.5px', fontWeight: '600', color: tokens.ink }}>
+                      {field.crop}
+                    </div>
+                    {field.notes && (
+                      <div style={{
+                        fontSize: '11.5px',
+                        color: tokens.inkSoft,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        marginTop: '1px',
+                      }}>
+                        {field.notes}
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{
+                    fontSize: '12.5px',
+                    fontWeight: '600',
+                    color: tokens.inkSoft,
+                    fontVariantNumeric: 'tabular-nums',
+                    flexShrink: 0,
+                  }}>
+                    {field.area}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteField(field.id);
+                    }}
+                    title="Delete this field"
+                    style={{
+                      backgroundColor: 'transparent',
+                      color: tokens.inkSoft,
+                      border: 'none',
+                      padding: '4px',
+                      borderRadius: '5px',
+                      cursor: 'pointer',
+                      fontSize: '13px',
+                      lineHeight: 1,
+                      flexShrink: 0,
+                      transition: 'color 0.15s ease, background-color 0.15s ease',
+                    }}
+                    onMouseOver={(e) => {
+                      e.currentTarget.style.color = tokens.clay;
+                      e.currentTarget.style.backgroundColor = tokens.claySoft;
+                    }}
+                    onMouseOut={(e) => {
+                      e.currentTarget.style.color = tokens.inkSoft;
+                      e.currentTarget.style.backgroundColor = 'transparent';
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
