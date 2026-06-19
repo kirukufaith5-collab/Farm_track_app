@@ -31,4 +31,3 @@ export default function useGPS(map) {
 
   return { currentLocation, trackLocation };
 }
-
