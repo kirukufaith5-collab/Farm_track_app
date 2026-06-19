@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { GoogleMap, Polygon, MarkerF } from '@react-google-maps/api';
+import { GoogleMap, Polygon, MarkerF, InfoWindow } from '@react-google-maps/api';
 
 const containerStyle = {
   width: '100%',
@@ -14,11 +14,60 @@ const defaultCenter = {
 
 export default function MapView({ currentLocation, fields, onMapLoad, onPolygonComplete, onSelectField }) {
   const [activePolygonPoints, setActivePolygonPoints] = useState([]);
+  // Tracks which saved field currently has its info popup open on the map.
+  // Holds the field object itself (or null when no popup is open).
+  const [activeInfoField, setActiveInfoField] = useState(null);
   const mapRef = useRef(null);
   const searchInputRef = useRef(null);
   const autocompleteRef = useRef(null);
 
-  
+  // Computes the rough center point of a polygon (average of its corner points)
+  // so the InfoWindow has a sensible anchor position on the map.
+  const getPolygonCenter = (coordinates) => {
+    const total = coordinates.reduce(
+      (acc, point) => ({ lat: acc.lat + point.lat, lng: acc.lng + point.lng }),
+      { lat: 0, lng: 0 }
+    );
+    return {
+      lat: total.lat / coordinates.length,
+      lng: total.lng / coordinates.length,
+    };
+  };
+
+  // Google's Places Autocomplete dropdown (.pac-container) is injected directly
+  // into document.body, outside of React's control. Google Maps' own internal
+  // canvas/tile layers can use very high z-index values internally, so a modest
+  // value like 9999 can still lose the stacking comparison — the dropdown becomes
+  // visible but clicks land on the map underneath it instead. Using a very high
+  // value (2147483647 = max safe 32-bit integer) guarantees it always wins.
+  useEffect(() => {
+    const styleId = 'pac-container-zindex-fix';
+    if (!document.getElementById(styleId)) {
+      const style = document.createElement('style');
+      style.id = styleId;
+      style.textContent = `
+        .pac-container {
+          z-index: 2147483647 !important;
+          pointer-events: auto !important;
+        }
+      `;
+      document.head.appendChild(style);
+    }
+  }, []);
+
+  // If the field currently shown in the info popup gets deleted (e.g. via the
+  // sidebar trash button) while the popup is still open, close the popup
+  // automatically instead of leaving it pointing at data that no longer exists.
+  useEffect(() => {
+    if (activeInfoField && !fields.some((f) => f.id === activeInfoField.id)) {
+      setActiveInfoField(null);
+    }
+  }, [fields, activeInfoField]);
+
+  // ✅ FIX 1: handleMapLoad now initializes Autocomplete AFTER the map (and therefore
+  // window.google) is confirmed ready. The previous useEffect(() => {}, []) ran on
+  // component mount — but at that moment window.google may not yet be available,
+  // causing Places to fail silently and the map to show the "can't load" error.
   const handleMapLoadInternal = useCallback((mapInstance) => {
     mapRef.current = mapInstance;
     onMapLoad(mapInstance);
@@ -28,7 +77,11 @@ export default function MapView({ currentLocation, fields, onMapLoad, onPolygonC
       autocompleteRef.current = new window.google.maps.places.Autocomplete(
         searchInputRef.current,
         {
-          
+          // ✅ FIX 2: Removed '(regions)' from types array.
+          // Mixing 'geocode' and '(regions)' in the same types array is not allowed
+          // by the Places API and silently breaks Autocomplete, causing the map error.
+          // Use one or the other, or omit 'types' entirely for broadest results.
+          fields: ['geometry', 'name', 'formatted_address'],
         }
       );
 
@@ -92,6 +145,7 @@ export default function MapView({ currentLocation, fields, onMapLoad, onPolygonC
         left: '20px',
         zIndex: 10,
         width: '360px',
+        isolation: 'isolate',
       }}>
         <input
           ref={searchInputRef}
@@ -130,7 +184,10 @@ export default function MapView({ currentLocation, fields, onMapLoad, onPolygonC
           <Polygon
             key={field.id}
             paths={field.coordinates}
-            onClick={() => onSelectField(field)}
+            // Clicking a plot now opens a quick-view popup instead of jumping
+            // straight into edit mode. Managers can inspect crop/area/notes
+            // at a glance, then choose to edit from inside the popup if needed.
+            onClick={() => setActiveInfoField(field)}
             options={{
               fillColor: '#10B981',
               fillOpacity: 0.35,
@@ -139,6 +196,46 @@ export default function MapView({ currentLocation, fields, onMapLoad, onPolygonC
             }}
           />
         ))}
+
+        {/* Quick-view info popup for the currently selected saved field */}
+        {activeInfoField && (
+          <InfoWindow
+            position={getPolygonCenter(activeInfoField.coordinates)}
+            onCloseClick={() => setActiveInfoField(null)}
+          >
+            <div style={{ minWidth: '180px', fontFamily: 'system-ui, sans-serif', padding: '2px' }}>
+              <div style={{ fontSize: '14px', fontWeight: '700', color: '#0f172a', marginBottom: '4px' }}>
+                {activeInfoField.crop}
+              </div>
+              <div style={{ fontSize: '12px', color: '#10b981', fontWeight: '600', marginBottom: '8px' }}>
+                {activeInfoField.area}
+              </div>
+              {activeInfoField.notes && (
+                <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '10px', lineHeight: '1.4' }}>
+                  {activeInfoField.notes}
+                </div>
+              )}
+              <button
+                onClick={() => {
+                  onSelectField(activeInfoField);
+                  setActiveInfoField(null);
+                }}
+                style={{
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  color: '#ffffff',
+                  backgroundColor: '#0f172a',
+                  border: 'none',
+                  borderRadius: '6px',
+                  padding: '6px 12px',
+                  cursor: 'pointer',
+                }}
+              >
+                ✏️ Edit Plot
+              </button>
+            </div>
+          </InfoWindow>
+        )}
 
         {/* Live drawing preview polygon */}
         {activePolygonPoints.length > 0 && (
