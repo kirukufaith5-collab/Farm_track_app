@@ -1,101 +1,120 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useImperativeHandle, forwardRef } from 'react';
 import { GoogleMap, Polygon, MarkerF, InfoWindow } from '@react-google-maps/api';
 
-const containerStyle = {
-  width: '100%',
-  height: '100%'
-};
+const containerStyle = { width: '100%', height: '100%' };
 
-// Default fallback coordinates centered around Kiambu region
-const defaultCenter = {
-  lat: -1.1462,
-  lng: 36.9610
-};
+const defaultCenter = { lat: -1.1462, lng: 36.9610 };
 
-export default function MapView({ currentLocation, fields, onMapLoad, onPolygonComplete, onSelectField }) {
+// ── Toast component ──────────────────────────────────────────────────────
+function Toast({ message, type = 'warning', onDone }) {
+  useEffect(() => {
+    const t = setTimeout(onDone, 3500);
+    return () => clearTimeout(t);
+  }, [onDone]);
+
+  const colors = {
+    warning: { bg: '#FEF3C7', border: '#F59E0B', text: '#92400E', icon: '⚠️' },
+    success: { bg: '#ECFDF5', border: '#10B981', text: '#065F46', icon: '✅' },
+    error:   { bg: '#FEF2F2', border: '#EF4444', text: '#B91C1C', icon: '🚫' },
+  };
+  const c = colors[type] || colors.warning;
+
+  return (
+    <div style={{
+      position: 'absolute',
+      top: '80px',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      zIndex: 50,
+      backgroundColor: c.bg,
+      border: `1.5px solid ${c.border}`,
+      color: c.text,
+      borderRadius: '10px',
+      padding: '12px 20px',
+      fontSize: '13.5px',
+      fontWeight: '600',
+      fontFamily: 'system-ui, sans-serif',
+      boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '8px',
+      maxWidth: 'calc(100vw - 48px)',
+      whiteSpace: 'nowrap',
+      animation: 'toastIn 0.2s ease',
+      pointerEvents: 'none',
+    }}>
+      <span>{c.icon}</span> {message}
+      <style>{`@keyframes toastIn { from { opacity:0; transform:translateX(-50%) translateY(-6px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }`}</style>
+    </div>
+  );
+}
+
+// ── MapView — exported with forwardRef so App can call panToField ────────
+const MapView = forwardRef(function MapView(
+  { currentLocation, fields, onMapLoad, onPolygonComplete, onSelectField, hasUnsavedPlot },
+  ref
+) {
   const [activePolygonPoints, setActivePolygonPoints] = useState([]);
-  // Tracks which saved field currently has its info popup open on the map.
-  // Holds the field object itself (or null when no popup is open).
+  const [redoStack, setRedoStack] = useState([]);
   const [activeInfoField, setActiveInfoField] = useState(null);
+  const [toast, setToast] = useState(null); // { message, type }
   const mapRef = useRef(null);
   const searchInputRef = useRef(null);
   const autocompleteRef = useRef(null);
 
-  // Computes the rough center point of a polygon (average of its corner points)
-  // so the InfoWindow has a sensible anchor position on the map.
+  // Expose panToField(field) to parent via ref
+  useImperativeHandle(ref, () => ({
+    panToField(field) {
+      if (!mapRef.current || !field?.coordinates?.length) return;
+      const center = getPolygonCenter(field.coordinates);
+      mapRef.current.panTo(center);
+      mapRef.current.setZoom(17);
+    },
+  }));
+
+  const showToast = (message, type = 'warning') => setToast({ message, type });
+
   const getPolygonCenter = (coordinates) => {
     const total = coordinates.reduce(
-      (acc, point) => ({ lat: acc.lat + point.lat, lng: acc.lng + point.lng }),
+      (acc, p) => ({ lat: acc.lat + p.lat, lng: acc.lng + p.lng }),
       { lat: 0, lng: 0 }
     );
-    return {
-      lat: total.lat / coordinates.length,
-      lng: total.lng / coordinates.length,
-    };
+    return { lat: total.lat / coordinates.length, lng: total.lng / coordinates.length };
   };
 
-  // Google's Places Autocomplete dropdown (.pac-container) is injected directly
-  // into document.body, outside of React's control. Google Maps' own internal
-  // canvas/tile layers can use very high z-index values internally, so a modest
-  // value like 9999 can still lose the stacking comparison — the dropdown becomes
-  // visible but clicks land on the map underneath it instead. Using a very high
-  // value (2147483647 = max safe 32-bit integer) guarantees it always wins.
+  // PAC container z-index fix
   useEffect(() => {
     const styleId = 'pac-container-zindex-fix';
     if (!document.getElementById(styleId)) {
       const style = document.createElement('style');
       style.id = styleId;
-      style.textContent = `
-        .pac-container {
-          z-index: 2147483647 !important;
-          pointer-events: auto !important;
-        }
-      `;
+      style.textContent = `.pac-container { z-index: 2147483647 !important; pointer-events: auto !important; }`;
       document.head.appendChild(style);
     }
   }, []);
 
-  // If the field currently shown in the info popup gets deleted (e.g. via the
-  // sidebar trash button) while the popup is still open, close the popup
-  // automatically instead of leaving it pointing at data that no longer exists.
+  // Auto-close info popup if its field is deleted
   useEffect(() => {
     if (activeInfoField && !fields.some((f) => f.id === activeInfoField.id)) {
       setActiveInfoField(null);
     }
   }, [fields, activeInfoField]);
 
-  // ✅ FIX 1: handleMapLoad now initializes Autocomplete AFTER the map (and therefore
-  // window.google) is confirmed ready. The previous useEffect(() => {}, []) ran on
-  // component mount — but at that moment window.google may not yet be available,
-  // causing Places to fail silently and the map to show the "can't load" error.
   const handleMapLoadInternal = useCallback((mapInstance) => {
     mapRef.current = mapInstance;
     onMapLoad(mapInstance);
 
-    // Initialize Autocomplete here — window.google is guaranteed to exist at this point
     if (searchInputRef.current && !autocompleteRef.current) {
       autocompleteRef.current = new window.google.maps.places.Autocomplete(
         searchInputRef.current,
-        {
-          // ✅ FIX 2: Removed '(regions)' from types array.
-          // Mixing 'geocode' and '(regions)' in the same types array is not allowed
-          // by the Places API and silently breaks Autocomplete, causing the map error.
-          // Use one or the other, or omit 'types' entirely for broadest results.
-          fields: ['geometry', 'name', 'formatted_address'],
-        }
+        { fields: ['geometry', 'name', 'formatted_address'] }
       );
-
       autocompleteRef.current.addListener('place_changed', () => {
         const place = autocompleteRef.current.getPlace();
-
-        // Guard: user pressed Enter without selecting a dropdown suggestion
-        if (!place || !place.geometry || !place.geometry.location) {
-          alert(
-            "No location details found. Please select a suggestion from the dropdown list rather than pressing Enter directly."
-          );
+        if (!place?.geometry?.location) {
+          showToast('Select a suggestion from the dropdown — do not press Enter directly.', 'error');
           return;
         }
-
         if (mapRef.current) {
           if (place.geometry.viewport) {
             mapRef.current.fitBounds(place.geometry.viewport);
@@ -108,45 +127,78 @@ export default function MapView({ currentLocation, fields, onMapLoad, onPolygonC
     }
   }, [onMapLoad]);
 
-  // Click handler for dropping plot boundary points on the map
+  // Block map clicks when there is an unsaved plot pending
   const handleMapClick = useCallback((e) => {
+    if (hasUnsavedPlot) {
+      showToast('Please save or discard the current plot before drawing a new one.', 'warning');
+      return;
+    }
     const lat = e.latLng.lat();
     const lng = e.latLng.lng();
     setActivePolygonPoints((prev) => [...prev, { lat, lng }]);
-  }, []);
+    setRedoStack([]);
+  }, [hasUnsavedPlot]);
+
+  const handleUndo = () => {
+    setActivePolygonPoints((prev) => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      setRedoStack((r) => [...r, last]);
+      return prev.slice(0, -1);
+    });
+  };
+
+  const handleRedo = () => {
+    setRedoStack((prev) => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      setActivePolygonPoints((pts) => [...pts, last]);
+      return prev.slice(0, -1);
+    });
+  };
 
   const finalizeFieldDrawing = () => {
     if (activePolygonPoints.length < 3) {
-      alert("A land parcel must contain at least 3 dropped coordinates!");
+      showToast('A land parcel needs at least 3 coordinates.', 'error');
       return;
     }
-
     const googlePolygon = new window.google.maps.Polygon({ paths: activePolygonPoints });
-    const sqMeters = window.google.maps.geometry.spherical.computeArea(
-      googlePolygon.getPath()
-    );
+    const sqMeters = window.google.maps.geometry.spherical.computeArea(googlePolygon.getPath());
     const hectares = (sqMeters / 10000).toFixed(2);
-
-    onPolygonComplete({
-      coordinates: activePolygonPoints,
-      area: `${hectares} ha`,
-    });
-
+    onPolygonComplete({ coordinates: activePolygonPoints, area: `${hectares} ha` });
     setActivePolygonPoints([]);
+    setRedoStack([]);
   };
+
+  const toolbarBtn = (bg, color = 'white', disabled = false) => ({
+    backgroundColor: disabled ? '#CBD5E1' : bg,
+    color: disabled ? '#94A3B8' : color,
+    border: 'none',
+    padding: '8px 16px',
+    borderRadius: '6px',
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    fontWeight: '600',
+    fontSize: '13px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '5px',
+    opacity: disabled ? 0.7 : 1,
+  });
 
   return (
     <div style={{ flex: 1, position: 'relative', height: '100%' }}>
 
+      {/* Toast */}
+      {toast && (
+        <Toast
+          message={toast.message}
+          type={toast.type}
+          onDone={() => setToast(null)}
+        />
+      )}
+
       {/* Floating Search Box */}
-      <div style={{
-        position: 'absolute',
-        top: '20px',
-        left: '20px',
-        zIndex: 10,
-        width: '360px',
-        isolation: 'isolate',
-      }}>
+      <div style={{ position: 'absolute', top: '20px', left: '20px', zIndex: 10, width: '360px', isolation: 'isolate' }}>
         <input
           ref={searchInputRef}
           type="text"
@@ -157,7 +209,7 @@ export default function MapView({ currentLocation, fields, onMapLoad, onPolygonC
             borderRadius: '12px',
             border: '1px solid #e2e8f0',
             backgroundColor: '#ffffff',
-            boxShadow: '0 10px 25px -5px rgba(0,0,0,0.1), 0 8px 10px -6px rgba(0,0,0,0.1)',
+            boxShadow: '0 10px 25px -5px rgba(0,0,0,0.1)',
             fontSize: '15px',
             fontFamily: 'system-ui, sans-serif',
             outline: 'none',
@@ -167,11 +219,35 @@ export default function MapView({ currentLocation, fields, onMapLoad, onPolygonC
         />
       </div>
 
+      {/* Unsaved plot banner */}
+      {hasUnsavedPlot && (
+        <div style={{
+          position: 'absolute',
+          top: '20px',
+          right: '20px',
+          zIndex: 10,
+          backgroundColor: '#FEF3C7',
+          border: '1.5px solid #F59E0B',
+          color: '#92400E',
+          borderRadius: '8px',
+          padding: '8px 14px',
+          fontSize: '12px',
+          fontWeight: '600',
+          fontFamily: 'system-ui, sans-serif',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
+        }}>
+          ⚠️ Unsaved plot — save it before drawing a new one
+        </div>
+      )}
+
       <GoogleMap
         mapContainerStyle={containerStyle}
         center={currentLocation || defaultCenter}
         zoom={14}
-        onLoad={handleMapLoadInternal}  // ✅ Autocomplete now initializes here
+        onLoad={handleMapLoadInternal}
         onClick={handleMapClick}
         options={{
           mapTypeId: 'satellite',
@@ -184,9 +260,6 @@ export default function MapView({ currentLocation, fields, onMapLoad, onPolygonC
           <Polygon
             key={field.id}
             paths={field.coordinates}
-            // Clicking a plot now opens a quick-view popup instead of jumping
-            // straight into edit mode. Managers can inspect crop/area/notes
-            // at a glance, then choose to edit from inside the popup if needed.
             onClick={() => setActiveInfoField(field)}
             options={{
               fillColor: '#10B981',
@@ -197,39 +270,56 @@ export default function MapView({ currentLocation, fields, onMapLoad, onPolygonC
           />
         ))}
 
-        {/* Quick-view info popup for the currently selected saved field */}
+        {/* GPS location blue dot */}
+        {currentLocation && (
+          <MarkerF
+            position={currentLocation}
+            icon={{
+              path: window.google?.maps?.SymbolPath?.CIRCLE || 0,
+              scale: 10,
+              fillColor: '#1D6AFF',
+              fillOpacity: 1,
+              strokeColor: '#ffffff',
+              strokeWeight: 3,
+            }}
+            title="Your location"
+            zIndex={999}
+          />
+        )}
+
+        {/* Info popup for saved field */}
         {activeInfoField && (
           <InfoWindow
             position={getPolygonCenter(activeInfoField.coordinates)}
             onCloseClick={() => setActiveInfoField(null)}
           >
-            <div style={{ minWidth: '180px', fontFamily: 'system-ui, sans-serif', padding: '2px' }}>
-              <div style={{ fontSize: '14px', fontWeight: '700', color: '#0f172a', marginBottom: '4px' }}>
+            <div style={{ minWidth: '200px', fontFamily: 'system-ui, sans-serif', padding: '2px' }}>
+              <div style={{ fontSize: '14px', fontWeight: '700', color: '#0f172a', marginBottom: '2px' }}>
                 {activeInfoField.crop}
               </div>
               <div style={{ fontSize: '12px', color: '#10b981', fontWeight: '600', marginBottom: '8px' }}>
                 {activeInfoField.area}
               </div>
+              {activeInfoField.ownerName && (
+                <div style={{ fontSize: '12px', color: '#334155', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                  <span>👤</span>
+                  <span style={{ fontWeight: '600' }}>{activeInfoField.ownerName}</span>
+                </div>
+              )}
+              {activeInfoField.farmerCode && (
+                <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '5px', fontFamily: 'monospace' }}>
+                  <span style={{ fontSize: '9px', fontWeight: '700', color: '#92400e', backgroundColor: '#FEF3C7', padding: '1px 5px', borderRadius: '3px', fontFamily: 'sans-serif', letterSpacing: '0.05em', textTransform: 'uppercase' }}>ID</span>
+                  {activeInfoField.farmerCode}
+                </div>
+              )}
               {activeInfoField.notes && (
                 <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '10px', lineHeight: '1.4' }}>
                   {activeInfoField.notes}
                 </div>
               )}
               <button
-                onClick={() => {
-                  onSelectField(activeInfoField);
-                  setActiveInfoField(null);
-                }}
-                style={{
-                  fontSize: '12px',
-                  fontWeight: '600',
-                  color: '#ffffff',
-                  backgroundColor: '#0f172a',
-                  border: 'none',
-                  borderRadius: '6px',
-                  padding: '6px 12px',
-                  cursor: 'pointer',
-                }}
+                onClick={() => { onSelectField(activeInfoField); setActiveInfoField(null); }}
+                style={{ fontSize: '12px', fontWeight: '600', color: '#ffffff', backgroundColor: '#0f172a', border: 'none', borderRadius: '6px', padding: '6px 12px', cursor: 'pointer', width: '100%' }}
               >
                 ✏️ Edit Plot
               </button>
@@ -237,26 +327,21 @@ export default function MapView({ currentLocation, fields, onMapLoad, onPolygonC
           </InfoWindow>
         )}
 
-        {/* Live drawing preview polygon */}
+        {/* Live drawing preview */}
         {activePolygonPoints.length > 0 && (
           <Polygon
             paths={activePolygonPoints}
-            options={{
-              fillColor: '#2563EB',
-              fillOpacity: 0.2,
-              strokeColor: '#2563EB',
-              strokeWeight: 2,
-            }}
+            options={{ fillColor: '#2563EB', fillOpacity: 0.2, strokeColor: '#2563EB', strokeWeight: 2 }}
           />
         )}
 
-        {/* Dropped coordinate markers */}
+        {/* Dropped markers */}
         {activePolygonPoints.map((point, index) => (
           <MarkerF key={index} position={point} label={`${index + 1}`} />
         ))}
       </GoogleMap>
 
-      {/* Draw confirmation toolbar */}
+      {/* Draw toolbar */}
       {activePolygonPoints.length > 0 && (
         <div style={{
           position: 'absolute',
@@ -264,31 +349,29 @@ export default function MapView({ currentLocation, fields, onMapLoad, onPolygonC
           left: '50%',
           transform: 'translateX(-50%)',
           backgroundColor: '#ffffff',
-          padding: '14px 28px',
+          padding: '12px 20px',
           borderRadius: '12px',
           boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)',
           display: 'flex',
-          gap: '16px',
+          gap: '10px',
           zIndex: 10,
           alignItems: 'center',
+          flexWrap: 'wrap',
+          maxWidth: 'calc(100vw - 48px)',
         }}>
-          <span style={{ fontSize: '14px', fontWeight: '600', fontFamily: 'sans-serif', color: '#334155' }}>
-            📍 Plotting Area ({activePolygonPoints.length} coordinates dropped)
+          <span style={{ fontSize: '13px', fontWeight: '600', fontFamily: 'sans-serif', color: '#334155', flexShrink: 0 }}>
+            📍 {activePolygonPoints.length} pts
           </span>
-          <button
-            onClick={finalizeFieldDrawing}
-            style={{ backgroundColor: '#10B981', color: 'white', border: 'none', padding: '8px 20px', borderRadius: '6px', cursor: 'pointer', fontWeight: '600', fontSize: '14px' }}
-          >
-            Save Boundary
-          </button>
-          <button
-            onClick={() => setActivePolygonPoints([])}
-            style={{ backgroundColor: '#EF4444', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontSize: '14px' }}
-          >
-            Reset
-          </button>
+          <div style={{ width: '1px', height: '24px', backgroundColor: '#e2e8f0', flexShrink: 0 }} />
+          <button onClick={handleUndo} disabled={activePolygonPoints.length === 0} title="Undo last point" style={toolbarBtn('#F1F5F9', '#334155', activePolygonPoints.length === 0)}>↩ Undo</button>
+          <button onClick={handleRedo} disabled={redoStack.length === 0} title="Redo" style={toolbarBtn('#F1F5F9', '#334155', redoStack.length === 0)}>↪ Redo</button>
+          <div style={{ width: '1px', height: '24px', backgroundColor: '#e2e8f0', flexShrink: 0 }} />
+          <button onClick={finalizeFieldDrawing} style={toolbarBtn('#10B981')}>✓ Save Boundary</button>
+          <button onClick={() => { setActivePolygonPoints([]); setRedoStack([]); }} style={toolbarBtn('#EF4444')}>✕ Reset</button>
         </div>
       )}
     </div>
   );
-}
+});
+
+export default MapView;
