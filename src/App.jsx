@@ -10,7 +10,6 @@ import {
   doc,
 } from 'firebase/firestore';
 import { db } from './firebase';
-
 import Sidebar from './components/Sidebar.jsx';
 import MapView from './components/MapView.jsx';
 import useGPS from './hooks/ useGPS.jsx';
