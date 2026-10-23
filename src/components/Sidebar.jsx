@@ -1,741 +1,373 @@
-import React, { useState, useEffect } from 'react';
+import {
+  useState, useCallback, useRef, useEffect, useReducer, useImperativeHandle, forwardRef,
+} from 'react';
+import { GoogleMap, Polygon, MarkerF, InfoWindow, Circle } from '@react-google-maps/api';
+import { getPolygonCenter, parseCoords, formatHa } from '../utils.js';
 
-// ── Design tokens ────────────────────────────────────────────────────────
-const tokens = {
-  bg: '#FAF7F2',
-  bgCard: '#FFFFFF',
-  ink: '#2B2420',
-  inkSoft: '#8A8175',
-  hairline: '#E6E0D6',
-  sage: '#5B7B5A',
-  sageSoft: '#EEF2EC',
-  clay: '#B5654A',
-  claySoft: '#FBEEEA',
-  amber: '#C18A3D',
-  errorBg: '#FEF2F2',
-  errorBorder: '#FCA5A5',
-  errorText: '#B91C1C',
+// ── Constants (outside the component so they are not re-created each render) ──
+const containerStyle = { width: '100%', height: '100%' };
+const defaultCenter = { lat: -1.1462, lng: 36.961 };
+
+const MAP_OPTIONS = {
+  mapTypeId: 'satellite',
+  fullscreenControl: false,
+  clickableIcons: false,
+  mapTypeControlOptions: { position: 3 },
 };
 
-// ── Crop icon lookup ────────────────────────────────────────────────────
-const CROP_ICON_MAP = [
-  { keywords: ['maize', 'corn'], icon: '🌽' },
-  { keywords: ['coffee'], icon: '☕' },
-  { keywords: ['tea'], icon: '🍃' },
-  { keywords: ['avocado'], icon: '🥑' },
-  { keywords: ['banana'], icon: '🍌' },
-  { keywords: ['bean'], icon: '🫘' },
-  { keywords: ['rice'], icon: '🌾' },
-  { keywords: ['wheat', 'barley'], icon: '🌾' },
-  { keywords: ['potato'], icon: '🥔' },
-  { keywords: ['tomato'], icon: '🍅' },
-  { keywords: ['mango'], icon: '🥭' },
-  { keywords: ['cattle', 'livestock', 'dairy', 'cow'], icon: '🐄' },
-  { keywords: ['poultry', 'chicken'], icon: '🐔' },
-  { keywords: ['fallow', 'storage', 'shed', 'building'], icon: '🏚️' },
-  { keywords: ['orchard', 'fruit'], icon: '🌳' },
-];
+const SAVED_STYLE = { fillColor: '#10B981', fillOpacity: 0.35, strokeColor: '#059669', strokeWeight: 2 };
+const SELECTED_STYLE = { ...SAVED_STYLE, fillOpacity: 0.55, strokeColor: '#065F46', strokeWeight: 3 };
+// While drawing, saved parcels must not swallow clicks meant for new points
+const LOCKED_STYLE = { ...SAVED_STYLE, clickable: false };
+const DRAFT_STYLE = { fillColor: '#F59E0B', fillOpacity: 0.35, strokeColor: '#B45309', strokeWeight: 2, clickable: false };
+const DRAWING_STYLE = { fillColor: '#2563EB', fillOpacity: 0.2, strokeColor: '#2563EB', strokeWeight: 2, clickable: false };
+const ACCURACY_STYLE = {
+  strokeColor: '#1D6AFF', strokeOpacity: 0.9, strokeWeight: 2,
+  fillColor: '#4A90FF', fillOpacity: 0.25, clickable: false,
+};
 
-function getCropIcon(crop) {
-  if (!crop || crop === 'Unassigned') return '◌';
-  const lower = crop.toLowerCase();
-  const match = CROP_ICON_MAP.find(({ keywords }) =>
-    keywords.some((kw) => lower.includes(kw))
-  );
-  return match ? match.icon : '🌱';
+// ── Drawing state: one reducer so undo/redo never nest setState calls ──────
+function drawReducer(state, action) {
+  switch (action.type) {
+    case 'add':
+      return { points: [...state.points, action.point], redo: [] };
+    case 'undo': {
+      if (!state.points.length) return state;
+      return { points: state.points.slice(0, -1), redo: [...state.redo, state.points.at(-1)] };
+    }
+    case 'redo': {
+      if (!state.redo.length) return state;
+      return { points: [...state.points, state.redo.at(-1)], redo: state.redo.slice(0, -1) };
+    }
+    case 'reset':
+      return { points: [], redo: [] };
+    default:
+      return state;
+  }
 }
 
-// ── Validation helpers ───────────────────────────────────────────────────
-function validateForm({ farmerCode, ownerName, crop }) {
-  const errors = {};
+const toolbarBtn = (bg, color = 'white', disabled = false) => ({
+  backgroundColor: disabled ? '#CBD5E1' : bg,
+  color: disabled ? '#94A3B8' : color,
+  border: 'none',
+  padding: '8px 16px',
+  borderRadius: '6px',
+  cursor: disabled ? 'not-allowed' : 'pointer',
+  fontWeight: 600,
+  fontSize: '13px',
+  display: 'flex',
+  alignItems: 'center',
+  gap: '5px',
+});
 
-  // Farmer Code: required, any characters allowed, 2–30 chars
-  if (!farmerCode || farmerCode.trim() === '') {
-    errors.farmerCode = 'Farmer code is required.';
-  } else if (farmerCode.trim().length < 2) {
-    errors.farmerCode = 'Farmer code must be at least 2 characters.';
-  } else if (farmerCode.trim().length > 30) {
-    errors.farmerCode = 'Farmer code must be 30 characters or fewer.';
-  }
+const divider = { width: '1px', height: '24px', backgroundColor: '#e2e8f0', flexShrink: 0 };
 
-  // Owner Name: required, letters + spaces + hyphens, 2–60 chars
-  if (!ownerName || ownerName.trim() === '') {
-    errors.ownerName = 'Plot owner name is required.';
-  } else if (ownerName.trim().length < 2) {
-    errors.ownerName = 'Name must be at least 2 characters.';
-  } else if (ownerName.trim().length > 60) {
-    errors.ownerName = 'Name must be 60 characters or fewer.';
-  } else if (!/^[A-Za-z\s\-'.]+$/.test(ownerName.trim())) {
-    errors.ownerName = 'Name may only contain letters, spaces, hyphens, or apostrophes.';
-  }
+// ── MapView — forwardRef so App can call panToField ────────────────────────
+const MapView = forwardRef(function MapView(
+  {
+    currentLocation, fields, draftField, selectedFieldId,
+    onMapLoad, onPolygonComplete, onSelectField, hasUnsavedPlot, onNotify,
+  },
+  ref
+) {
+  const [draw, dispatch] = useReducer(drawReducer, { points: [], redo: [] });
+  const [activeInfoId, setActiveInfoId] = useState(null);
+  const [searchPin, setSearchPin] = useState(null); // { position, title, address }
+  const mapRef = useRef(null);
+  const searchInputRef = useRef(null);
 
-  // Crop: optional, but if provided must be reasonable
-  if (crop && crop.trim().length > 50) {
-    errors.crop = 'Crop name must be 50 characters or fewer.';
-  }
+  const drawing = draw.points.length > 0;
+  // Derived, so a deleted parcel closes its popup without an effect
+  const activeInfoField = fields.find((f) => f.id === activeInfoId) ?? null;
+  const here = currentLocation && { lat: currentLocation.lat, lng: currentLocation.lng };
 
-  return errors;
-}
+  // Parent calls this when a parcel is clicked in the sidebar list
+  useImperativeHandle(ref, () => ({
+    panToField(field) {
+      const map = mapRef.current;
+      if (!map || !field?.coordinates?.length) return;
+      const bounds = new window.google.maps.LatLngBounds();
+      field.coordinates.forEach((p) => bounds.extend(p));
+      map.fitBounds(bounds, 80);
+    },
+  }), []);
 
-// ── Reusable field component ─────────────────────────────────────────────
-function FormField({ label, required, error, children }) {
+  // ── Search: drop a pin like Google Maps does ──────────────────────────────
+  const goToPlace = useCallback((position, title, address, viewport) => {
+    setSearchPin({ position, title, address });
+    const map = mapRef.current;
+    if (!map) return;
+    if (viewport) {
+      map.fitBounds(viewport);
+    } else {
+      map.panTo(position);
+      map.setZoom(17);
+    }
+  }, []);
+
+  const clearSearch = useCallback(() => {
+    setSearchPin(null);
+    if (searchInputRef.current) searchInputRef.current.value = '';
+  }, []);
+
+  // Fallback when the user presses Enter without picking a suggestion:
+  // try coordinates first, then the Geocoder.
+  const searchByText = useCallback((text) => {
+    const query = (text || '').trim();
+    if (!query) return;
+
+    const coords = parseCoords(query);
+    if (coords) {
+      goToPlace(coords, 'Coordinates', `${coords.lat.toFixed(5)}, ${coords.lng.toFixed(5)}`);
+      return;
+    }
+
+    new window.google.maps.Geocoder().geocode({ address: query }, (results, status) => {
+      const result = results?.[0];
+      if (status === 'OK' && result) {
+        goToPlace(result.geometry.location.toJSON(), query, result.formatted_address, result.geometry.viewport);
+      } else {
+        onNotify('No place found. Try a nearby town, or coordinates like -1.1462, 36.9610.', 'error');
+      }
+    });
+  }, [goToPlace, onNotify]);
+
+  useEffect(() => {
+    const input = searchInputRef.current;
+    if (!input) return undefined;
+
+    const autocomplete = new window.google.maps.places.Autocomplete(input, {
+      fields: ['geometry', 'name', 'formatted_address'],
+    });
+    const listener = autocomplete.addListener('place_changed', () => {
+      const place = autocomplete.getPlace();
+      if (place?.geometry?.location) {
+        goToPlace(
+          place.geometry.location.toJSON(),
+          place.name,
+          place.formatted_address,
+          place.geometry.viewport
+        );
+      } else {
+        searchByText(place?.name || input.value);
+      }
+    });
+
+    return () => {
+      listener.remove();
+      window.google.maps.event.clearInstanceListeners(autocomplete);
+    };
+  }, [goToPlace, searchByText]);
+
+  // PAC dropdown must sit above the sidebar and map controls
+  useEffect(() => {
+    const id = 'pac-container-zindex-fix';
+    if (document.getElementById(id)) return;
+    const style = document.createElement('style');
+    style.id = id;
+    style.textContent = '.pac-container{z-index:2147483647!important;pointer-events:auto!important}';
+    document.head.appendChild(style);
+  }, []);
+
+  // ── Map + drawing handlers ────────────────────────────────────────────────
+  const handleMapLoad = useCallback((map) => {
+    mapRef.current = map;
+    onMapLoad(map);
+  }, [onMapLoad]);
+
+  const handleMapUnmount = useCallback(() => {
+    mapRef.current = null;
+  }, []);
+
+  const handleMapClick = useCallback((e) => {
+    if (hasUnsavedPlot) {
+      onNotify('Save or cancel the current plot before drawing a new one.', 'warning');
+      return;
+    }
+    dispatch({ type: 'add', point: e.latLng.toJSON() });
+  }, [hasUnsavedPlot, onNotify]);
+
+  const finalizeDrawing = () => {
+    if (draw.points.length < 3) {
+      onNotify('A land parcel needs at least 3 points.', 'error');
+      return;
+    }
+    const sqMeters = window.google.maps.geometry.spherical.computeArea(draw.points);
+    const areaHa = Math.round(sqMeters / 100) / 100;
+    onPolygonComplete({ coordinates: draw.points, areaHa, area: formatHa(areaHa) });
+    dispatch({ type: 'reset' });
+  };
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-      <label style={{
-        fontSize: '11.5px',
-        fontWeight: '600',
-        color: tokens.inkSoft,
-        display: 'flex',
-        alignItems: 'center',
-        gap: '4px',
-      }}>
-        {label}
-        {required && (
-          <span style={{ color: tokens.clay, fontSize: '11px' }} title="Required">*</span>
+    <div style={{ flex: 1, position: 'relative', height: '100%' }}>
+      {/* Search box */}
+      <div style={{ position: 'absolute', top: '20px', left: '20px', zIndex: 10, width: 'min(360px, calc(100% - 40px))' }}>
+        <input
+          ref={searchInputRef}
+          type="text"
+          aria-label="Search places or coordinates"
+          placeholder="🔍 Search a place or coordinates"
+          style={{
+            width: '100%', padding: '14px 44px 14px 20px', borderRadius: '12px',
+            border: '1px solid #e2e8f0', backgroundColor: '#ffffff',
+            boxShadow: '0 10px 25px -5px rgba(0,0,0,0.1)', fontSize: '15px',
+            fontFamily: 'system-ui, sans-serif', outline: 'none', boxSizing: 'border-box', color: '#1e293b',
+          }}
+        />
+        {searchPin && (
+          <button
+            type="button"
+            onClick={clearSearch}
+            aria-label="Clear search and remove pin"
+            style={{
+              position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)',
+              background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '16px', color: '#64748b', padding: '6px',
+            }}
+          >
+            ✕
+          </button>
         )}
-      </label>
-      {children}
-      {error && (
+      </div>
+
+      {hasUnsavedPlot && (
         <div style={{
-          fontSize: '11px',
-          color: tokens.errorText,
-          backgroundColor: tokens.errorBg,
-          border: `1px solid ${tokens.errorBorder}`,
-          borderRadius: '5px',
-          padding: '4px 8px',
-          lineHeight: '1.4',
+          position: 'absolute', top: '76px', left: '20px', zIndex: 10, backgroundColor: '#FEF3C7',
+          border: '1.5px solid #F59E0B', color: '#92400E', borderRadius: '8px', padding: '8px 14px',
+          fontSize: '12px', fontWeight: 600, fontFamily: 'system-ui, sans-serif',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
         }}>
-          ⚠ {error}
+          ⚠️ Unsaved plot — save it or cancel before drawing another
+        </div>
+      )}
+
+      <GoogleMap
+        mapContainerStyle={containerStyle}
+        center={defaultCenter}
+        zoom={14}
+        onLoad={handleMapLoad}
+        onUnmount={handleMapUnmount}
+        onClick={handleMapClick}
+        options={MAP_OPTIONS}
+      >
+        {/* Saved parcels */}
+        {fields.map((field) => (
+          <Polygon
+            key={field.id}
+            paths={field.coordinates}
+            onClick={() => setActiveInfoId(field.id)}
+            options={drawing ? LOCKED_STYLE : field.id === selectedFieldId ? SELECTED_STYLE : SAVED_STYLE}
+          />
+        ))}
+
+        {/* Drawn but not yet saved */}
+        {draftField && <Polygon paths={draftField.coordinates} options={DRAFT_STYLE} />}
+
+        {/* GPS position + accuracy */}
+        {here && (
+          <>
+            <Circle center={here} radius={currentLocation.accuracy} options={ACCURACY_STYLE} />
+            <MarkerF
+              position={here}
+              title="Your location"
+              zIndex={999}
+              icon={{
+                path: window.google.maps.SymbolPath.CIRCLE,
+                scale: 10, fillColor: '#1D6AFF', fillOpacity: 1, strokeColor: '#ffffff', strokeWeight: 3,
+              }}
+            />
+          </>
+        )}
+
+        {/* Search result pin */}
+        {searchPin && (
+          <MarkerF position={searchPin.position} title={searchPin.title} zIndex={1000}>
+            <InfoWindow onCloseClick={clearSearch}>
+              <div style={{ fontFamily: 'system-ui, sans-serif', maxWidth: '220px' }}>
+                <div style={{ fontSize: '14px', fontWeight: 700, color: '#0f172a' }}>{searchPin.title}</div>
+                {searchPin.address && (
+                  <div style={{ fontSize: '12px', color: '#64748b', marginTop: '2px', lineHeight: 1.4 }}>
+                    {searchPin.address}
+                  </div>
+                )}
+                <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px', fontFamily: 'monospace' }}>
+                  {searchPin.position.lat.toFixed(5)}, {searchPin.position.lng.toFixed(5)}
+                </div>
+              </div>
+            </InfoWindow>
+          </MarkerF>
+        )}
+
+        {/* Saved parcel popup */}
+        {activeInfoField && (
+          <InfoWindow
+            position={getPolygonCenter(activeInfoField.coordinates)}
+            onCloseClick={() => setActiveInfoId(null)}
+          >
+            <div style={{ minWidth: '200px', fontFamily: 'system-ui, sans-serif', padding: '2px' }}>
+              <div style={{ fontSize: '14px', fontWeight: 700, color: '#0f172a', marginBottom: '2px' }}>
+                {activeInfoField.crop}
+              </div>
+              <div style={{ fontSize: '12px', color: '#10b981', fontWeight: 600, marginBottom: '8px' }}>
+                {activeInfoField.area}
+              </div>
+              {activeInfoField.ownerName && (
+                <div style={{ fontSize: '12px', color: '#334155', marginBottom: '4px' }}>
+                  👤 <strong>{activeInfoField.ownerName}</strong>
+                </div>
+              )}
+              {activeInfoField.farmerCode && (
+                <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '8px', fontFamily: 'monospace' }}>
+                  ID {activeInfoField.farmerCode}
+                </div>
+              )}
+              {activeInfoField.notes && (
+                <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '10px', lineHeight: 1.4 }}>
+                  {activeInfoField.notes}
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => { onSelectField(activeInfoField); setActiveInfoId(null); }}
+                style={{
+                  fontSize: '12px', fontWeight: 600, color: '#ffffff', backgroundColor: '#0f172a',
+                  border: 'none', borderRadius: '6px', padding: '6px 12px', cursor: 'pointer', width: '100%',
+                }}
+              >
+                ✏️ Edit plot
+              </button>
+            </div>
+          </InfoWindow>
+        )}
+
+        {/* Live drawing preview */}
+        {drawing && <Polygon paths={draw.points} options={DRAWING_STYLE} />}
+        {draw.points.map((point, index) => (
+          <MarkerF key={`${point.lat}-${point.lng}`} position={point} label={`${index + 1}`} />
+        ))}
+      </GoogleMap>
+
+      {/* Draw toolbar */}
+      {drawing && (
+        <div style={{
+          position: 'absolute', bottom: '30px', left: '50%', transform: 'translateX(-50%)',
+          backgroundColor: '#ffffff', padding: '12px 20px', borderRadius: '12px',
+          boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)', display: 'flex', gap: '10px', zIndex: 10,
+          alignItems: 'center', flexWrap: 'wrap', maxWidth: 'calc(100% - 32px)', justifyContent: 'center',
+        }}>
+          <span style={{ fontSize: '13px', fontWeight: 600, fontFamily: 'sans-serif', color: '#334155' }}>
+            📍 {draw.points.length} pts
+          </span>
+          <div style={divider} />
+          <button type="button" onClick={() => dispatch({ type: 'undo' })} style={toolbarBtn('#F1F5F9', '#334155')}>↩ Undo</button>
+          <button type="button" onClick={() => dispatch({ type: 'redo' })} disabled={!draw.redo.length}
+            style={toolbarBtn('#F1F5F9', '#334155', !draw.redo.length)}>↪ Redo</button>
+          <div style={divider} />
+          <button type="button" onClick={finalizeDrawing} style={toolbarBtn('#10B981')}>✓ Save boundary</button>
+          <button type="button" onClick={() => dispatch({ type: 'reset' })} style={toolbarBtn('#EF4444')}>✕ Reset</button>
         </div>
       )}
     </div>
   );
-}
+});
 
-export default function Sidebar({
-  onLocateClick,
-  selectedField,
-  fields,
-  onSaveField,
-  onDeleteField,
-  onFlyToField,
-  saving,
-  dbLoading,
-  isMobileOpen,
-  onMobileClose,
-}) {
-  const [cropDraft, setCropDraft] = useState('');
-  const [farmerCode, setFarmerCode] = useState('');
-  const [ownerName, setOwnerName] = useState('');
-  const [errors, setErrors] = useState({});
-  const [touched, setTouched] = useState({});
-  const [savedToast, setSavedToast] = useState(false);
-
-  // Reset form state whenever a new field is selected
-  useEffect(() => {
-    if (selectedField) {
-      setCropDraft(selectedField.crop !== 'Unassigned' ? selectedField.crop : '');
-      setFarmerCode(selectedField.farmerCode || '');
-      setOwnerName(selectedField.ownerName || '');
-      setErrors({});
-      setTouched({});
-    }
-  }, [selectedField?.id, selectedField]);
-
-  // Live validation on blur
-  const handleBlur = (field) => {
-    setTouched((prev) => ({ ...prev, [field]: true }));
-    const errs = validateForm({ farmerCode, ownerName, crop: cropDraft });
-    setErrors(errs);
-  };
-
-  const getInputStyle = (fieldName) => ({
-    padding: '10px 12px',
-    borderRadius: '7px',
-    border: `1px solid ${touched[fieldName] && errors[fieldName] ? tokens.errorBorder : tokens.hairline}`,
-    backgroundColor: touched[fieldName] && errors[fieldName] ? tokens.errorBg : tokens.bg,
-    fontSize: '13.5px',
-    color: tokens.ink,
-    outline: 'none',
-    transition: 'border-color 0.15s ease, background-color 0.15s ease',
-    width: '100%',
-    boxSizing: 'border-box',
-  });
-
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    // Mark all fields touched on submit attempt
-    setTouched({ farmerCode: true, ownerName: true, crop: true });
-    const formData = new FormData(e.target);
-    const cropVal = formData.get('crop') || '';
-    const errs = validateForm({ farmerCode, ownerName, crop: cropVal });
-    setErrors(errs);
-
-    if (Object.keys(errs).length > 0) return; // Stop if errors exist
-
-    onSaveField({
-      ...selectedField,
-      farmerCode: farmerCode.trim(),
-      ownerName: ownerName.trim(),
-      crop: cropVal.trim() || 'Unassigned',
-      notes: formData.get('notes') || '',
-    });
-
-    // Show confirmation toast
-    setSavedToast(true);
-    setTimeout(() => setSavedToast(false), 3000);
-  };
-
-  return (
-    <>
-      {/* ── Mobile overlay backdrop ─────────────────────────────────── */}
-      {isMobileOpen && (
-        <div
-          onClick={onMobileClose}
-          style={{
-            position: 'fixed',
-            inset: 0,
-            backgroundColor: 'rgba(0,0,0,0.4)',
-            zIndex: 4,
-            display: 'none', // shown via media query in <style> below
-          }}
-          className="sidebar-backdrop"
-        />
-      )}
-
-      <style>{`
-        @media (max-width: 768px) {
-          .sidebar-root {
-            position: fixed !important;
-            top: 0;
-            left: 0;
-            height: 100dvh !important;
-            width: 88vw !important;
-            max-width: 360px !important;
-            transform: translateX(-100%);
-            transition: transform 0.28s cubic-bezier(0.4,0,0.2,1);
-            z-index: 50 !important;
-            box-shadow: 4px 0 24px rgba(0,0,0,0.18);
-          }
-          .sidebar-root.open {
-            transform: translateX(0);
-          }
-          .sidebar-backdrop {
-            display: block !important;
-          }
-        }
-        @media (min-width: 769px) {
-          .sidebar-root {
-            position: relative !important;
-            transform: none !important;
-            width: 380px !important;
-            box-shadow: none !important;
-          }
-        }
-        input[type="text"]:focus, textarea:focus {
-          box-shadow: 0 0 0 2px rgba(91,123,90,0.2);
-        }
-      `}</style>
-
-      <div
-        className={`sidebar-root${isMobileOpen ? ' open' : ''}`}
-        style={{
-          width: '380px',
-          height: '100vh',
-          backgroundColor: tokens.bg,
-          borderRight: `1px solid ${tokens.hairline}`,
-          display: 'flex',
-          flexDirection: 'column',
-          zIndex: 5,
-          fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
-          overflow: 'hidden',
-          position: 'relative',
-        }}
-      >
-
-        {/* ── Saved confirmation toast ────────────────────────────────── */}
-        {savedToast && (
-          <div style={{
-            position: 'absolute',
-            top: '12px',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            zIndex: 100,
-            backgroundColor: '#ECFDF5',
-            border: '1.5px solid #10B981',
-            color: '#065F46',
-            borderRadius: '8px',
-            padding: '10px 18px',
-            fontSize: '13px',
-            fontWeight: '600',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '7px',
-            boxShadow: '0 4px 16px rgba(0,0,0,0.10)',
-            whiteSpace: 'nowrap',
-            animation: 'sidebarToastIn 0.2s ease',
-          }}>
-            ✅ Plot saved to database!
-            <style>{`@keyframes sidebarToastIn { from { opacity:0; transform:translateX(-50%) translateY(-4px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }`}</style>
-          </div>
-        )}
-
-        {/* ── Header strip ────────────────────────────────────────────── */}
-        <div style={{
-          padding: '22px 24px 18px',
-          background: `
-            repeating-linear-gradient(
-              0deg,
-              rgba(91,123,90,0.035) 0px,
-              rgba(91,123,90,0.035) 1px,
-              transparent 1px,
-              transparent 4px
-            ),
-            linear-gradient(180deg, #F3EEE3 0%, ${tokens.bg} 100%)
-          `,
-          borderBottom: `1px solid ${tokens.hairline}`,
-          flexShrink: 0,
-          display: 'flex',
-          alignItems: 'flex-start',
-          justifyContent: 'space-between',
-        }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: '10px', marginBottom: '4px' }}>
-              <h1 style={{
-                margin: 0,
-                fontSize: '21px',
-                fontWeight: '700',
-                color: tokens.ink,
-                letterSpacing: '-0.3px',
-              }}>
-                FarmTrack
-              </h1>
-              <span style={{
-                fontSize: '10px',
-                fontWeight: '700',
-                letterSpacing: '0.06em',
-                textTransform: 'uppercase',
-                color: tokens.sage,
-                backgroundColor: tokens.sageSoft,
-                padding: '2px 7px',
-                borderRadius: '4px',
-              }}>
-                Field Ops
-              </span>
-            </div>
-            <p style={{ margin: 0, fontSize: '12.5px', color: tokens.inkSoft, lineHeight: '1.5' }}>
-              Plot parcels, register crops, manage land records.
-            </p>
-          </div>
-
-          {/* Mobile close button */}
-          <button
-            onClick={onMobileClose}
-            className="sidebar-close-btn"
-            aria-label="Close sidebar"
-            style={{
-              display: 'none',
-              background: 'transparent',
-              border: 'none',
-              cursor: 'pointer',
-              fontSize: '18px',
-              color: tokens.inkSoft,
-              padding: '2px 4px',
-              borderRadius: '5px',
-            }}
-          />
-          <style>{`
-            @media (max-width: 768px) {
-              .sidebar-close-btn { display: flex !important; align-items: center; justify-content: center; }
-              .sidebar-close-btn::after { content: '✕'; }
-            }
-          `}</style>
-        </div>
-
-        {/* ── Scrollable body ──────────────────────────────────────────── */}
-        <div style={{
-          flex: 1,
-          overflowY: 'auto',
-          padding: '20px 24px 28px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '20px',
-        }}>
-
-          {/* GPS button */}
-          <button
-            onClick={onLocateClick}
-            style={{
-              width: '100%',
-              backgroundColor: tokens.ink,
-              color: '#FFFFFF',
-              border: 'none',
-              padding: '13px 16px',
-              borderRadius: '8px',
-              fontSize: '13.5px',
-              fontWeight: '600',
-              letterSpacing: '0.01em',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '8px',
-              transition: 'opacity 0.15s ease',
-            }}
-            onMouseOver={(e) => { e.currentTarget.style.opacity = '0.85'; }}
-            onMouseOut={(e) => { e.currentTarget.style.opacity = '1'; }}
-          >
-            <span aria-hidden="true">⌖</span> Locate Me via GPS
-          </button>
-
-          {/* ── Plot editor ─────────────────────────────────────────── */}
-          {selectedField && (
-            <div style={{
-              backgroundColor: tokens.bgCard,
-              border: `1px solid ${tokens.hairline}`,
-              borderRadius: '10px',
-              padding: '18px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '14px',
-            }}>
-              {/* Editor header */}
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span style={{
-                    width: '26px',
-                    height: '26px',
-                    borderRadius: '7px',
-                    backgroundColor: tokens.sageSoft,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    fontSize: '13px',
-                    flexShrink: 0,
-                  }}>
-                    {getCropIcon(cropDraft)}
-                  </span>
-                  <h3 style={{
-                    margin: 0,
-                    fontSize: '11px',
-                    fontWeight: '700',
-                    letterSpacing: '0.06em',
-                    textTransform: 'uppercase',
-                    color: tokens.inkSoft,
-                  }}>
-                    {selectedField.id ? 'Edit Plot' : 'Register Plot'}
-                  </h3>
-                </div>
-                <span style={{
-                  fontSize: '13px',
-                  fontWeight: '700',
-                  color: tokens.sage,
-                  fontVariantNumeric: 'tabular-nums',
-                }}>
-                  {selectedField.area}
-                </span>
-              </div>
-
-              {/* Required field note */}
-              <p style={{ margin: 0, fontSize: '11px', color: tokens.inkSoft }}>
-                Fields marked <span style={{ color: tokens.clay }}>*</span> are required.
-              </p>
-
-              <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-
-                {/* ── Farmer Code ────────────────────────────────────── */}
-                <FormField label="Farmer Code" required error={touched.farmerCode && errors.farmerCode}>
-                  <input
-                    name="farmerCode"
-                    type="text"
-                    value={farmerCode}
-                    onChange={(e) => setFarmerCode(e.target.value)}
-                    onBlur={() => handleBlur('farmerCode')}
-                    placeholder="e.g. KE-2024-001 or FC/001/2024"
-                    maxLength={30}
-                    autoComplete="off"
-                    style={getInputStyle('farmerCode')}
-                  />
-                </FormField>
-
-                {/* ── Plot Owner Name ────────────────────────────────── */}
-                <FormField label="Plot Owner Name" required error={touched.ownerName && errors.ownerName}>
-                  <input
-                    name="ownerName"
-                    type="text"
-                    value={ownerName}
-                    onChange={(e) => setOwnerName(e.target.value)}
-                    onBlur={() => handleBlur('ownerName')}
-                    placeholder="e.g. Jane Wambui Mwangi"
-                    maxLength={60}
-                    autoComplete="name"
-                    style={getInputStyle('ownerName')}
-                    onFocus={(e) => {
-                      if (!errors.ownerName) e.target.style.borderColor = tokens.sage;
-                    }}
-                  />
-                  {ownerName && !errors.ownerName && touched.ownerName && (
-                    <span style={{ fontSize: '11px', color: tokens.sage }}>✓ Valid name</span>
-                  )}
-                </FormField>
-
-                {/* ── Crop ──────────────────────────────────────────── */}
-                <FormField label="Crop" error={touched.crop && errors.crop}>
-                  <input
-                    name="crop"
-                    type="text"
-                    value={cropDraft}
-                    onChange={(e) => setCropDraft(e.target.value)}
-                    onBlur={() => handleBlur('crop')}
-                    placeholder="e.g. Maize, Coffee, Avocado"
-                    maxLength={50}
-                    style={getInputStyle('crop')}
-                    onFocus={(e) => {
-                      if (!errors.crop) e.target.style.borderColor = tokens.sage;
-                    }}
-                  />
-                </FormField>
-
-                {/* ── Notes ──────────────────────────────────────────── */}
-                <FormField label="Notes">
-                  <textarea
-                    name="notes"
-                    defaultValue={selectedField.notes}
-                    placeholder="Soil treatments, harvest expectations..."
-                    rows={3}
-                    maxLength={500}
-                    style={{
-                      ...getInputStyle('notes'),
-                      resize: 'vertical',
-                      minHeight: '76px',
-                      fontFamily: 'inherit',
-                    }}
-                    onFocus={(e) => { e.target.style.borderColor = tokens.sage; }}
-                    onBlur={(e) => { e.target.style.borderColor = tokens.hairline; }}
-                  />
-                </FormField>
-
-                {/* ── Action buttons ─────────────────────────────────── */}
-                <div style={{ display: 'flex', gap: '8px', marginTop: '2px' }}>
-                  <button
-                    type="submit"
-                    disabled={saving}
-                    style={{
-                      flex: 1,
-                      backgroundColor: saving ? '#9DB59C' : tokens.sage,
-                      color: '#FFFFFF',
-                      border: 'none',
-                      padding: '11px 10px',
-                      borderRadius: '7px',
-                      fontSize: '13px',
-                      fontWeight: '600',
-                      cursor: saving ? 'not-allowed' : 'pointer',
-                      transition: 'background-color 0.15s ease',
-                    }}
-                  >
-                    {saving ? 'Saving…' : 'Save to Database'}
-                  </button>
-
-                  {selectedField.id && (
-                    <button
-                      type="button"
-                      onClick={() => onDeleteField(selectedField.id)}
-                      title="Delete this plot"
-                      style={{
-                        backgroundColor: tokens.claySoft,
-                        color: tokens.clay,
-                        border: 'none',
-                        padding: '11px 13px',
-                        borderRadius: '7px',
-                        cursor: 'pointer',
-                        fontSize: '13px',
-                        fontWeight: '600',
-                        flexShrink: 0,
-                      }}
-                    >
-                      Remove
-                    </button>
-                  )}
-                </div>
-              </form>
-            </div>
-          )}
-
-          {/* ── Logged parcels — ledger style ───────────────────────── */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-              <h3 style={{
-                margin: 0,
-                fontSize: '11px',
-                fontWeight: '700',
-                letterSpacing: '0.06em',
-                textTransform: 'uppercase',
-                color: tokens.inkSoft,
-              }}>
-                Logged Parcels
-              </h3>
-              <span style={{ fontSize: '12px', color: tokens.inkSoft, fontVariantNumeric: 'tabular-nums' }}>
-                {dbLoading ? '···' : `${fields.length} total`}
-              </span>
-            </div>
-
-            {dbLoading ? (
-              <div style={{ display: 'flex', flexDirection: 'column' }}>
-                {[1, 2, 3].map((i) => (
-                  <div key={i} style={{
-                    height: '50px',
-                    borderBottom: `1px solid ${tokens.hairline}`,
-                    background: `linear-gradient(90deg, transparent, ${tokens.hairline}55, transparent)`,
-                    backgroundSize: '200% 100%',
-                    animation: 'shimmer 1.4s infinite',
-                  }} />
-                ))}
-                <style>{`@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }`}</style>
-              </div>
-            ) : fields.length === 0 ? (
-              <div style={{
-                padding: '32px 16px',
-                border: `1.5px dashed ${tokens.hairline}`,
-                borderRadius: '10px',
-                textAlign: 'center',
-              }}>
-                <p style={{ margin: 0, fontSize: '12.5px', color: tokens.inkSoft, lineHeight: '1.5' }}>
-                  No plots logged yet.<br />Click the map to start drawing a boundary.
-                </p>
-              </div>
-            ) : (
-              <div>
-                {fields.map((field) => (
-                  <div
-                    key={field.id}
-                    onClick={() => onFlyToField(field)}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '10px',
-                      padding: '11px 4px',
-                      borderBottom: `1px solid ${tokens.hairline}`,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <span style={{
-                      width: '30px',
-                      height: '30px',
-                      borderRadius: '8px',
-                      backgroundColor: field.crop === 'Unassigned' ? tokens.bg : tokens.sageSoft,
-                      border: field.crop === 'Unassigned' ? `1px dashed ${tokens.hairline}` : 'none',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      fontSize: '15px',
-                      flexShrink: 0,
-                    }}>
-                      {getCropIcon(field.crop)}
-                    </span>
-
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: '13.5px', fontWeight: '600', color: tokens.ink }}>
-                        {field.crop}
-                      </div>
-                      {/* Owner name */}
-                      {field.ownerName && (
-                        <div style={{
-                          fontSize: '11px',
-                          color: tokens.sage,
-                          fontWeight: '500',
-                          marginTop: '1px',
-                        }}>
-                          👤 {field.ownerName}
-                        </div>
-                      )}
-                      {/* Farmer code — always shown if present */}
-                      {field.farmerCode && (
-                        <div style={{
-                          fontSize: '11px',
-                          color: tokens.inkSoft,
-                          fontFamily: 'monospace',
-                          marginTop: '1px',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '3px',
-                        }}>
-                          <span style={{
-                            fontSize: '9px',
-                            fontWeight: '700',
-                            letterSpacing: '0.05em',
-                            textTransform: 'uppercase',
-                            color: tokens.amber,
-                            backgroundColor: '#FEF3C7',
-                            padding: '1px 4px',
-                            borderRadius: '3px',
-                            fontFamily: 'sans-serif',
-                          }}>
-                            ID
-                          </span>
-                          {field.farmerCode}
-                        </div>
-                      )}
-                      {field.notes && (
-                        <div style={{
-                          fontSize: '11.5px',
-                          color: tokens.inkSoft,
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
-                          marginTop: '1px',
-                        }}>
-                          {field.notes}
-                        </div>
-                      )}
-                    </div>
-
-                    <div style={{
-                      fontSize: '12.5px',
-                      fontWeight: '600',
-                      color: tokens.inkSoft,
-                      fontVariantNumeric: 'tabular-nums',
-                      flexShrink: 0,
-                    }}>
-                      {field.area}
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDeleteField(field.id);
-                      }}
-                      title="Delete this field"
-                      style={{
-                        backgroundColor: 'transparent',
-                        color: tokens.inkSoft,
-                        border: 'none',
-                        padding: '4px',
-                        borderRadius: '5px',
-                        cursor: 'pointer',
-                        fontSize: '13px',
-                        lineHeight: 1,
-                        flexShrink: 0,
-                        transition: 'color 0.15s ease, background-color 0.15s ease',
-                      }}
-                      onMouseOver={(e) => {
-                        e.currentTarget.style.color = tokens.clay;
-                        e.currentTarget.style.backgroundColor = tokens.claySoft;
-                      }}
-                      onMouseOut={(e) => {
-                        e.currentTarget.style.color = tokens.inkSoft;
-                        e.currentTarget.style.backgroundColor = 'transparent';
-                      }}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    </>
-  );
-}
+export default MapView;
