@@ -61,12 +61,12 @@ const toolbarBtn = (bg, color = 'white', disabled = false) => ({
 });
 
 const divider = { width: '1px', height: '24px', backgroundColor: '#e2e8f0', flexShrink: 0 };
-
+ const noop =() =>{}
 // ── MapView — forwardRef so App can call panToField ────────────────────────
 const MapView = forwardRef(function MapView(
   {
     currentLocation, fields, draftField, selectedFieldId,
-    onMapLoad, onPolygonComplete, onSelectField, hasUnsavedPlot, onNotify,
+    onMapLoad =noop, onPolygonComplete, onSelectField, hasUnsavedPlot, onNotify,
   },
   ref
 ) {
