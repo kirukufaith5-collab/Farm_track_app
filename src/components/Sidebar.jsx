@@ -192,10 +192,26 @@ function PlotEditor({ field, saving, onSave, onCancel, onDelete }) {
   );
 }
 
+const SYNC_LABELS = {
+  synced:     { dot: '#10B981', text: 'Synced to cloud' },
+  pending:    { dot: '#F59E0B', text: 'Waiting to sync. Keep this tab open.' },
+  connecting: { dot: '#94A3B8', text: 'Connecting to cloud…' },
+};
+
+function SyncBadge({ state }) {
+  const s = SYNC_LABELS[state] ?? SYNC_LABELS.connecting;
+  return (
+    <div role="status" style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: t.inkSoft }}>
+      <span aria-hidden="true" style={{ width: '8px', height: '8px', borderRadius: '50%', background: s.dot }} />
+      {s.text}
+    </div>
+  );
+}
+
 // ── Sidebar ──────────────────────────────────────────────────────────────
 export default function Sidebar({
   onLocateClick, locating, selectedField, fields, onSaveField, onCancel, onDeleteField,
-  onFlyToField, saving, dbLoading, isMobileOpen, onMobileClose, userEmail, onSignOut,
+  onFlyToField, saving, dbLoading, syncState, isMobileOpen, onMobileClose, userEmail, onSignOut,
 }) {
   const [query, setQuery] = useState('');
 
@@ -354,6 +370,8 @@ export default function Sidebar({
               </div>
             )}
           </section>
+
+          <SyncBadge state={syncState} />
 
           <footer style={{
             marginTop: 'auto', paddingTop: '14px', borderTop: `1px solid ${t.hairline}`,

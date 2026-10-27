@@ -20,8 +20,8 @@ const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 
 export const db = initializeFirestore(app, {
-  // Fixes writes that never get confirmed on networks that break streaming
- experimentalAutoDetectLongPolling: true,
+  // Picks WebSockets or long polling automatically, whichever works on this network
+  experimentalAutoDetectLongPolling: true,
   // Parcels stay available (and editable) with no signal in the field
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
 });

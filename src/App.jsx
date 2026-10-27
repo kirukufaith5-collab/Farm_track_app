@@ -10,7 +10,7 @@ import Sidebar from './components/Sidebar.jsx';
 import MapView from './components/MapView.jsx';
 import Login from './components/Login.jsx';
 import Toast from './components/Toast.jsx';
-import useGPS from './hooks/ useGPS.js';
+import useGPS from './hooks/useGPS.js';
 import { getAreaHa, settleWithin } from './utils.js';
 import styles from './App.module.css';
 
@@ -28,7 +28,7 @@ function Workspace({ user }) {
   });
 
   const [map, setMap] = useState(null);
-  const [data, setData] = useState({ uid: null, fields: NO_FIELDS });
+  const [data, setData] = useState({ uid: null, fields: NO_FIELDS, sync: 'connecting' });
   const [selectedField, setSelectedField] = useState(null);
   const [dbError, setDbError] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -60,10 +60,14 @@ function Workspace({ user }) {
   useEffect(() => {
     return onSnapshot(
       collection(db, 'users', uid, 'fields'),
+      { includeMetadataChanges: true },
       (snapshot) => {
         const loaded = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
         loaded.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-        setData({ uid, fields: loaded });
+        const sync = snapshot.metadata.hasPendingWrites
+          ? 'pending'
+          : snapshot.metadata.fromCache ? 'connecting' : 'synced';
+        setData({ uid, fields: loaded, sync });
       },
       (error) => {
         console.error('Firestore read error:', error);
@@ -99,8 +103,8 @@ function Workspace({ user }) {
             ...values,
             createdAt: now,
           });
-          write.catch((error) => console.error('Firestore write error (may be late):', error));
 
+      write.catch((error) => console.error('Firestore write error (may arrive late):', error));
       const outcome = await settleWithin(write);
       setSelectedField(null);
       if (outcome === 'saved') notify('Plot saved.', 'success');
@@ -190,6 +194,7 @@ function Workspace({ user }) {
         onFlyToField={handleFlyToField}
         saving={saving}
         dbLoading={dbLoading}
+        syncState={dbLoading ? 'connecting' : data.sync}
         isMobileOpen={sidebarOpen}
         onMobileClose={() => setSidebarOpen(false)}
         userEmail={user.email}
