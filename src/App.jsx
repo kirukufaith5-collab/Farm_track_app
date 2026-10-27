@@ -10,7 +10,7 @@ import Sidebar from './components/Sidebar.jsx';
 import MapView from './components/MapView.jsx';
 import Login from './components/Login.jsx';
 import Toast from './components/Toast.jsx';
-import useGPS from './hooks/useGPS.js';
+import useGPS from './hooks/ useGPS.js';
 import { getAreaHa, settleWithin } from './utils.js';
 import styles from './App.module.css';
 
