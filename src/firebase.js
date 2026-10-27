@@ -21,7 +21,7 @@ export const auth = getAuth(app);
 
 export const db = initializeFirestore(app, {
   // Fixes writes that never get confirmed on networks that break streaming
-  experimentalForceLongPolling: true,
+ experimentalAutoDetectLongPolling: true,
   // Parcels stay available (and editable) with no signal in the field
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
 });
