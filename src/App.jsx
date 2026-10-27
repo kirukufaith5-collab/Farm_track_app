@@ -99,6 +99,7 @@ function Workspace({ user }) {
             ...values,
             createdAt: now,
           });
+          write.catch((error) => console.error('Firestore write error (may be late):', error));
 
       const outcome = await settleWithin(write);
       setSelectedField(null);
