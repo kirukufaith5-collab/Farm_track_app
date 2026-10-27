@@ -1,373 +1,374 @@
-import {
-  useState, useCallback, useRef, useEffect, useReducer, useImperativeHandle, forwardRef,
-} from 'react';
-import { GoogleMap, Polygon, MarkerF, InfoWindow, Circle } from '@react-google-maps/api';
-import { getPolygonCenter, parseCoords, formatHa } from '../utils.js';
+import { useState, useMemo } from 'react';
+import { tokens as t } from '../theme.js';
+import { getAreaHa, formatHa, exportCSV, exportGeoJSON } from '../utils.js';
 
-// ── Constants (outside the component so they are not re-created each render) ──
-const containerStyle = { width: '100%', height: '100%' };
-const defaultCenter = { lat: -1.1462, lng: 36.961 };
+// ── Styles ───────────────────────────────────────────────────────────────
+const CSS = `
+.ft-side{position:relative;width:380px;flex-shrink:0;height:100vh;background:${t.bg};border-right:1px solid ${t.hairline};display:flex;flex-direction:column;z-index:5;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;color:${t.ink}}
+.ft-head{padding:22px 24px 18px;border-bottom:1px solid ${t.hairline};display:flex;justify-content:space-between;align-items:flex-start;background:linear-gradient(180deg,#F3EEE3 0%,${t.bg} 100%)}
+.ft-body{flex:1;overflow-y:auto;padding:20px 24px 24px;display:flex;flex-direction:column;gap:20px}
+.ft-btn{border:none;border-radius:7px;padding:11px 14px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;transition:opacity .15s}
+.ft-btn:hover:not(:disabled){opacity:.88}
+.ft-btn:disabled{cursor:not-allowed;opacity:.65}
+.ft-link{background:none;border:none;padding:0;font:inherit;font-size:12px;color:${t.sage};font-weight:600;cursor:pointer}
+.ft-input{width:100%;box-sizing:border-box;padding:10px 12px;border-radius:7px;border:1px solid ${t.hairline};background:${t.bg};font-size:13.5px;font-family:inherit;color:${t.ink}}
+.ft-input.bad{border-color:${t.errorBorder};background:${t.errorBg}}
+.ft-btn:focus-visible,.ft-input:focus-visible,.ft-row:focus-visible,.ft-link:focus-visible,.ft-x:focus-visible{outline:2px solid ${t.sage};outline-offset:2px}
+.ft-row{display:flex;align-items:center;gap:10px;padding:11px 6px;border-bottom:1px solid ${t.hairline};cursor:pointer;border-radius:6px}
+.ft-row:hover,.ft-row.on{background:${t.sageSoft}}
+.ft-x{background:transparent;border:none;color:${t.inkSoft};padding:4px 6px;border-radius:5px;cursor:pointer;font-size:13px;line-height:1}
+.ft-x:hover{color:${t.clay};background:${t.claySoft}}
+.ft-close,.ft-backdrop{display:none}
+@media (max-width:768px){
+.ft-side{position:fixed;top:0;left:0;height:100dvh;width:88vw;max-width:360px;transform:translateX(-100%);transition:transform .28s cubic-bezier(.4,0,.2,1);z-index:50;box-shadow:4px 0 24px rgba(0,0,0,.18)}
+.ft-side.open{transform:none}
+.ft-close{display:block;background:transparent;border:none;font-size:18px;color:${t.inkSoft};cursor:pointer;padding:2px 6px}
+.ft-backdrop{display:block;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:49}
+}
+@media (prefers-reduced-motion:reduce){.ft-side{transition:none}}
+`;
 
-const MAP_OPTIONS = {
-  mapTypeId: 'satellite',
-  fullscreenControl: false,
-  clickableIcons: false,
-  mapTypeControlOptions: { position: 3 },
+const sectionTitle = {
+  margin: 0, fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em',
+  textTransform: 'uppercase', color: t.inkSoft,
 };
 
-const SAVED_STYLE = { fillColor: '#10B981', fillOpacity: 0.35, strokeColor: '#059669', strokeWeight: 2 };
-const SELECTED_STYLE = { ...SAVED_STYLE, fillOpacity: 0.55, strokeColor: '#065F46', strokeWeight: 3 };
-// While drawing, saved parcels must not swallow clicks meant for new points
-const LOCKED_STYLE = { ...SAVED_STYLE, clickable: false };
-const DRAFT_STYLE = { fillColor: '#F59E0B', fillOpacity: 0.35, strokeColor: '#B45309', strokeWeight: 2, clickable: false };
-const DRAWING_STYLE = { fillColor: '#2563EB', fillOpacity: 0.2, strokeColor: '#2563EB', strokeWeight: 2, clickable: false };
-const ACCURACY_STYLE = {
-  strokeColor: '#1D6AFF', strokeOpacity: 0.9, strokeWeight: 2,
-  fillColor: '#4A90FF', fillOpacity: 0.25, clickable: false,
-};
+// ── Crop icons ───────────────────────────────────────────────────────────
+const CROP_ICONS = [
+  [['maize', 'corn'], '🌽'], [['coffee'], '☕'], [['tea'], '🍃'], [['avocado'], '🥑'],
+  [['banana'], '🍌'], [['bean'], '🫘'], [['rice', 'wheat', 'barley'], '🌾'],
+  [['potato'], '🥔'], [['tomato'], '🍅'], [['mango'], '🥭'],
+  [['cattle', 'livestock', 'dairy', 'cow'], '🐄'], [['poultry', 'chicken'], '🐔'],
+  [['fallow', 'storage', 'shed', 'building'], '🏚️'], [['orchard', 'fruit'], '🌳'],
+];
 
-// ── Drawing state: one reducer so undo/redo never nest setState calls ──────
-function drawReducer(state, action) {
-  switch (action.type) {
-    case 'add':
-      return { points: [...state.points, action.point], redo: [] };
-    case 'undo': {
-      if (!state.points.length) return state;
-      return { points: state.points.slice(0, -1), redo: [...state.redo, state.points.at(-1)] };
-    }
-    case 'redo': {
-      if (!state.redo.length) return state;
-      return { points: [...state.points, state.redo.at(-1)], redo: state.redo.slice(0, -1) };
-    }
-    case 'reset':
-      return { points: [], redo: [] };
-    default:
-      return state;
-  }
+function getCropIcon(crop) {
+  if (!crop || crop === 'Unassigned') return '◌';
+  const lower = crop.toLowerCase();
+  const hit = CROP_ICONS.find(([words]) => words.some((w) => lower.includes(w)));
+  return hit ? hit[1] : '🌱';
 }
 
-const toolbarBtn = (bg, color = 'white', disabled = false) => ({
-  backgroundColor: disabled ? '#CBD5E1' : bg,
-  color: disabled ? '#94A3B8' : color,
-  border: 'none',
-  padding: '8px 16px',
-  borderRadius: '6px',
-  cursor: disabled ? 'not-allowed' : 'pointer',
-  fontWeight: 600,
-  fontSize: '13px',
-  display: 'flex',
-  alignItems: 'center',
-  gap: '5px',
-});
+// ── Validation ───────────────────────────────────────────────────────────
+function validateForm({ farmerCode, ownerName, crop }) {
+  const errors = {};
+  const code = farmerCode.trim();
+  const name = ownerName.trim();
 
-const divider = { width: '1px', height: '24px', backgroundColor: '#e2e8f0', flexShrink: 0 };
+  if (!code) errors.farmerCode = 'Farmer code is required.';
+  else if (code.length < 2) errors.farmerCode = 'Farmer code must be at least 2 characters.';
 
-// ── MapView — forwardRef so App can call panToField ────────────────────────
-const MapView = forwardRef(function MapView(
-  {
-    currentLocation, fields, draftField, selectedFieldId,
-    onMapLoad, onPolygonComplete, onSelectField, hasUnsavedPlot, onNotify,
-  },
-  ref
-) {
-  const [draw, dispatch] = useReducer(drawReducer, { points: [], redo: [] });
-  const [activeInfoId, setActiveInfoId] = useState(null);
-  const [searchPin, setSearchPin] = useState(null); // { position, title, address }
-  const mapRef = useRef(null);
-  const searchInputRef = useRef(null);
+  if (!name) errors.ownerName = 'Plot owner name is required.';
+  else if (name.length < 2) errors.ownerName = 'Name must be at least 2 characters.';
+  else if (!/^[\p{L}\s'’.-]+$/u.test(name)) {
+    errors.ownerName = 'Name may only contain letters, spaces, hyphens, or apostrophes.';
+  }
 
-  const drawing = draw.points.length > 0;
-  // Derived, so a deleted parcel closes its popup without an effect
-  const activeInfoField = fields.find((f) => f.id === activeInfoId) ?? null;
-  const here = currentLocation && { lat: currentLocation.lat, lng: currentLocation.lng };
+  if (crop.trim().length > 50) errors.crop = 'Crop name must be 50 characters or fewer.';
+  return errors;
+}
 
-  // Parent calls this when a parcel is clicked in the sidebar list
-  useImperativeHandle(ref, () => ({
-    panToField(field) {
-      const map = mapRef.current;
-      if (!map || !field?.coordinates?.length) return;
-      const bounds = new window.google.maps.LatLngBounds();
-      field.coordinates.forEach((p) => bounds.extend(p));
-      map.fitBounds(bounds, 80);
-    },
-  }), []);
-
-  // ── Search: drop a pin like Google Maps does ──────────────────────────────
-  const goToPlace = useCallback((position, title, address, viewport) => {
-    setSearchPin({ position, title, address });
-    const map = mapRef.current;
-    if (!map) return;
-    if (viewport) {
-      map.fitBounds(viewport);
-    } else {
-      map.panTo(position);
-      map.setZoom(17);
-    }
-  }, []);
-
-  const clearSearch = useCallback(() => {
-    setSearchPin(null);
-    if (searchInputRef.current) searchInputRef.current.value = '';
-  }, []);
-
-  // Fallback when the user presses Enter without picking a suggestion:
-  // try coordinates first, then the Geocoder.
-  const searchByText = useCallback((text) => {
-    const query = (text || '').trim();
-    if (!query) return;
-
-    const coords = parseCoords(query);
-    if (coords) {
-      goToPlace(coords, 'Coordinates', `${coords.lat.toFixed(5)}, ${coords.lng.toFixed(5)}`);
-      return;
-    }
-
-    new window.google.maps.Geocoder().geocode({ address: query }, (results, status) => {
-      const result = results?.[0];
-      if (status === 'OK' && result) {
-        goToPlace(result.geometry.location.toJSON(), query, result.formatted_address, result.geometry.viewport);
-      } else {
-        onNotify('No place found. Try a nearby town, or coordinates like -1.1462, 36.9610.', 'error');
-      }
-    });
-  }, [goToPlace, onNotify]);
-
-  useEffect(() => {
-    const input = searchInputRef.current;
-    if (!input) return undefined;
-
-    const autocomplete = new window.google.maps.places.Autocomplete(input, {
-      fields: ['geometry', 'name', 'formatted_address'],
-    });
-    const listener = autocomplete.addListener('place_changed', () => {
-      const place = autocomplete.getPlace();
-      if (place?.geometry?.location) {
-        goToPlace(
-          place.geometry.location.toJSON(),
-          place.name,
-          place.formatted_address,
-          place.geometry.viewport
-        );
-      } else {
-        searchByText(place?.name || input.value);
-      }
-    });
-
-    return () => {
-      listener.remove();
-      window.google.maps.event.clearInstanceListeners(autocomplete);
-    };
-  }, [goToPlace, searchByText]);
-
-  // PAC dropdown must sit above the sidebar and map controls
-  useEffect(() => {
-    const id = 'pac-container-zindex-fix';
-    if (document.getElementById(id)) return;
-    const style = document.createElement('style');
-    style.id = id;
-    style.textContent = '.pac-container{z-index:2147483647!important;pointer-events:auto!important}';
-    document.head.appendChild(style);
-  }, []);
-
-  // ── Map + drawing handlers ────────────────────────────────────────────────
-  const handleMapLoad = useCallback((map) => {
-    mapRef.current = map;
-    onMapLoad(map);
-  }, [onMapLoad]);
-
-  const handleMapUnmount = useCallback(() => {
-    mapRef.current = null;
-  }, []);
-
-  const handleMapClick = useCallback((e) => {
-    if (hasUnsavedPlot) {
-      onNotify('Save or cancel the current plot before drawing a new one.', 'warning');
-      return;
-    }
-    dispatch({ type: 'add', point: e.latLng.toJSON() });
-  }, [hasUnsavedPlot, onNotify]);
-
-  const finalizeDrawing = () => {
-    if (draw.points.length < 3) {
-      onNotify('A land parcel needs at least 3 points.', 'error');
-      return;
-    }
-    const sqMeters = window.google.maps.geometry.spherical.computeArea(draw.points);
-    const areaHa = Math.round(sqMeters / 100) / 100;
-    onPolygonComplete({ coordinates: draw.points, areaHa, area: formatHa(areaHa) });
-    dispatch({ type: 'reset' });
-  };
-
+function Field({ label, required, error, children }) {
   return (
-    <div style={{ flex: 1, position: 'relative', height: '100%' }}>
-      {/* Search box */}
-      <div style={{ position: 'absolute', top: '20px', left: '20px', zIndex: 10, width: 'min(360px, calc(100% - 40px))' }}>
-        <input
-          ref={searchInputRef}
-          type="text"
-          aria-label="Search places or coordinates"
-          placeholder="🔍 Search a place or coordinates"
-          style={{
-            width: '100%', padding: '14px 44px 14px 20px', borderRadius: '12px',
-            border: '1px solid #e2e8f0', backgroundColor: '#ffffff',
-            boxShadow: '0 10px 25px -5px rgba(0,0,0,0.1)', fontSize: '15px',
-            fontFamily: 'system-ui, sans-serif', outline: 'none', boxSizing: 'border-box', color: '#1e293b',
-          }}
-        />
-        {searchPin && (
-          <button
-            type="button"
-            onClick={clearSearch}
-            aria-label="Clear search and remove pin"
-            style={{
-              position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)',
-              background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '16px', color: '#64748b', padding: '6px',
-            }}
-          >
-            ✕
-          </button>
-        )}
-      </div>
-
-      {hasUnsavedPlot && (
-        <div style={{
-          position: 'absolute', top: '76px', left: '20px', zIndex: 10, backgroundColor: '#FEF3C7',
-          border: '1.5px solid #F59E0B', color: '#92400E', borderRadius: '8px', padding: '8px 14px',
-          fontSize: '12px', fontWeight: 600, fontFamily: 'system-ui, sans-serif',
-          boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '11.5px', fontWeight: 600, color: t.inkSoft }}>
+        <span>
+          {label}
+          {required && <span style={{ color: t.clay }} title="Required"> *</span>}
+        </span>
+        {children}
+      </label>
+      {error && (
+        <div role="alert" style={{
+          fontSize: '11px', color: t.errorText, backgroundColor: t.errorBg,
+          border: `1px solid ${t.errorBorder}`, borderRadius: '5px', padding: '4px 8px',
         }}>
-          ⚠️ Unsaved plot — save it or cancel before drawing another
-        </div>
-      )}
-
-      <GoogleMap
-        mapContainerStyle={containerStyle}
-        center={defaultCenter}
-        zoom={14}
-        onLoad={handleMapLoad}
-        onUnmount={handleMapUnmount}
-        onClick={handleMapClick}
-        options={MAP_OPTIONS}
-      >
-        {/* Saved parcels */}
-        {fields.map((field) => (
-          <Polygon
-            key={field.id}
-            paths={field.coordinates}
-            onClick={() => setActiveInfoId(field.id)}
-            options={drawing ? LOCKED_STYLE : field.id === selectedFieldId ? SELECTED_STYLE : SAVED_STYLE}
-          />
-        ))}
-
-        {/* Drawn but not yet saved */}
-        {draftField && <Polygon paths={draftField.coordinates} options={DRAFT_STYLE} />}
-
-        {/* GPS position + accuracy */}
-        {here && (
-          <>
-            <Circle center={here} radius={currentLocation.accuracy} options={ACCURACY_STYLE} />
-            <MarkerF
-              position={here}
-              title="Your location"
-              zIndex={999}
-              icon={{
-                path: window.google.maps.SymbolPath.CIRCLE,
-                scale: 10, fillColor: '#1D6AFF', fillOpacity: 1, strokeColor: '#ffffff', strokeWeight: 3,
-              }}
-            />
-          </>
-        )}
-
-        {/* Search result pin */}
-        {searchPin && (
-          <MarkerF position={searchPin.position} title={searchPin.title} zIndex={1000}>
-            <InfoWindow onCloseClick={clearSearch}>
-              <div style={{ fontFamily: 'system-ui, sans-serif', maxWidth: '220px' }}>
-                <div style={{ fontSize: '14px', fontWeight: 700, color: '#0f172a' }}>{searchPin.title}</div>
-                {searchPin.address && (
-                  <div style={{ fontSize: '12px', color: '#64748b', marginTop: '2px', lineHeight: 1.4 }}>
-                    {searchPin.address}
-                  </div>
-                )}
-                <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px', fontFamily: 'monospace' }}>
-                  {searchPin.position.lat.toFixed(5)}, {searchPin.position.lng.toFixed(5)}
-                </div>
-              </div>
-            </InfoWindow>
-          </MarkerF>
-        )}
-
-        {/* Saved parcel popup */}
-        {activeInfoField && (
-          <InfoWindow
-            position={getPolygonCenter(activeInfoField.coordinates)}
-            onCloseClick={() => setActiveInfoId(null)}
-          >
-            <div style={{ minWidth: '200px', fontFamily: 'system-ui, sans-serif', padding: '2px' }}>
-              <div style={{ fontSize: '14px', fontWeight: 700, color: '#0f172a', marginBottom: '2px' }}>
-                {activeInfoField.crop}
-              </div>
-              <div style={{ fontSize: '12px', color: '#10b981', fontWeight: 600, marginBottom: '8px' }}>
-                {activeInfoField.area}
-              </div>
-              {activeInfoField.ownerName && (
-                <div style={{ fontSize: '12px', color: '#334155', marginBottom: '4px' }}>
-                  👤 <strong>{activeInfoField.ownerName}</strong>
-                </div>
-              )}
-              {activeInfoField.farmerCode && (
-                <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '8px', fontFamily: 'monospace' }}>
-                  ID {activeInfoField.farmerCode}
-                </div>
-              )}
-              {activeInfoField.notes && (
-                <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '10px', lineHeight: 1.4 }}>
-                  {activeInfoField.notes}
-                </div>
-              )}
-              <button
-                type="button"
-                onClick={() => { onSelectField(activeInfoField); setActiveInfoId(null); }}
-                style={{
-                  fontSize: '12px', fontWeight: 600, color: '#ffffff', backgroundColor: '#0f172a',
-                  border: 'none', borderRadius: '6px', padding: '6px 12px', cursor: 'pointer', width: '100%',
-                }}
-              >
-                ✏️ Edit plot
-              </button>
-            </div>
-          </InfoWindow>
-        )}
-
-        {/* Live drawing preview */}
-        {drawing && <Polygon paths={draw.points} options={DRAWING_STYLE} />}
-        {draw.points.map((point, index) => (
-          <MarkerF key={`${point.lat}-${point.lng}`} position={point} label={`${index + 1}`} />
-        ))}
-      </GoogleMap>
-
-      {/* Draw toolbar */}
-      {drawing && (
-        <div style={{
-          position: 'absolute', bottom: '30px', left: '50%', transform: 'translateX(-50%)',
-          backgroundColor: '#ffffff', padding: '12px 20px', borderRadius: '12px',
-          boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)', display: 'flex', gap: '10px', zIndex: 10,
-          alignItems: 'center', flexWrap: 'wrap', maxWidth: 'calc(100% - 32px)', justifyContent: 'center',
-        }}>
-          <span style={{ fontSize: '13px', fontWeight: 600, fontFamily: 'sans-serif', color: '#334155' }}>
-            📍 {draw.points.length} pts
-          </span>
-          <div style={divider} />
-          <button type="button" onClick={() => dispatch({ type: 'undo' })} style={toolbarBtn('#F1F5F9', '#334155')}>↩ Undo</button>
-          <button type="button" onClick={() => dispatch({ type: 'redo' })} disabled={!draw.redo.length}
-            style={toolbarBtn('#F1F5F9', '#334155', !draw.redo.length)}>↪ Redo</button>
-          <div style={divider} />
-          <button type="button" onClick={finalizeDrawing} style={toolbarBtn('#10B981')}>✓ Save boundary</button>
-          <button type="button" onClick={() => dispatch({ type: 'reset' })} style={toolbarBtn('#EF4444')}>✕ Reset</button>
+          ⚠ {error}
         </div>
       )}
     </div>
   );
-});
+}
 
-export default MapView;
+// ── Plot editor ──────────────────────────────────────────────────────────
+// App gives this a `key` per plot, so its state resets by remounting;
+// no effect is needed to copy props into state.
+function PlotEditor({ field, saving, onSave, onCancel, onDelete }) {
+  const [values, setValues] = useState(() => ({
+    farmerCode: field.farmerCode || '',
+    ownerName: field.ownerName || '',
+    crop: field.crop && field.crop !== 'Unassigned' ? field.crop : '',
+    notes: field.notes || '',
+  }));
+  const [touched, setTouched] = useState({});
+  const errors = validateForm(values);
+
+  const bind = (name) => {
+    const bad = Boolean(touched[name] && errors[name]);
+    return {
+      name,
+      value: values[name],
+      onChange: (e) => setValues((v) => ({ ...v, [name]: e.target.value })),
+      onBlur: () => setTouched((x) => ({ ...x, [name]: true })),
+      className: `ft-input${bad ? ' bad' : ''}`,
+      'aria-invalid': bad,
+    };
+  };
+  const shown = (name) => (touched[name] ? errors[name] : undefined);
+
+  const submit = (e) => {
+    e.preventDefault();
+    setTouched({ farmerCode: true, ownerName: true, crop: true });
+    if (Object.keys(errors).length) return;
+    onSave({
+      farmerCode: values.farmerCode.trim(),
+      ownerName: values.ownerName.trim(),
+      crop: values.crop.trim() || 'Unassigned',
+      notes: values.notes.trim(),
+    });
+  };
+
+  return (
+    <div style={{
+      backgroundColor: t.bgCard, border: `1px solid ${t.hairline}`, borderRadius: '10px',
+      padding: '18px', display: 'flex', flexDirection: 'column', gap: '14px',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span style={{
+            width: '26px', height: '26px', borderRadius: '7px', backgroundColor: t.sageSoft,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '13px',
+          }}>
+            {getCropIcon(values.crop)}
+          </span>
+          <h2 style={sectionTitle}>{field.id ? 'Edit plot' : 'Register plot'}</h2>
+        </div>
+        <span style={{ fontSize: '13px', fontWeight: 700, color: t.sage }}>{field.area}</span>
+      </div>
+
+      <p style={{ margin: 0, fontSize: '11px', color: t.inkSoft }}>
+        Fields marked <span style={{ color: t.clay }}>*</span> are required.
+      </p>
+
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        <Field label="Farmer code" required error={shown('farmerCode')}>
+          <input {...bind('farmerCode')} type="text" maxLength={30} autoComplete="off"
+            placeholder="e.g. KE-2024-001 or FC/001/2024" />
+        </Field>
+
+        <Field label="Plot owner name" required error={shown('ownerName')}>
+          <input {...bind('ownerName')} type="text" maxLength={60} autoComplete="name"
+            placeholder="e.g. Jane Wambui Mwangi" />
+        </Field>
+
+        <Field label="Crop" error={shown('crop')}>
+          <input {...bind('crop')} type="text" maxLength={50} placeholder="e.g. Maize, Coffee, Avocado" />
+        </Field>
+
+        <Field label="Notes">
+          <textarea {...bind('notes')} rows={3} maxLength={500}
+            placeholder="Soil treatments, harvest expectations…"
+            style={{ resize: 'vertical', minHeight: '76px' }} />
+        </Field>
+
+        <div style={{ display: 'flex', gap: '8px', marginTop: '2px' }}>
+          <button type="submit" disabled={saving} className="ft-btn"
+            style={{ flex: 1, backgroundColor: t.sage, color: '#fff' }}>
+            {saving ? 'Saving…' : 'Save plot'}
+          </button>
+          <button type="button" onClick={onCancel} disabled={saving} className="ft-btn"
+            style={{ backgroundColor: t.bg, color: t.inkSoft, border: `1px solid ${t.hairline}` }}>
+            Cancel
+          </button>
+          {field.id && (
+            <button type="button" onClick={() => onDelete(field.id)} disabled={saving} className="ft-btn"
+              style={{ backgroundColor: t.claySoft, color: t.clay }}>
+              Remove
+            </button>
+          )}
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ── Sidebar ──────────────────────────────────────────────────────────────
+export default function Sidebar({
+  onLocateClick, locating, selectedField, fields, onSaveField, onCancel, onDeleteField,
+  onFlyToField, saving, dbLoading, isMobileOpen, onMobileClose, userEmail, onSignOut,
+}) {
+  const [query, setQuery] = useState('');
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return fields;
+    return fields.filter((f) =>
+      [f.crop, f.ownerName, f.farmerCode, f.notes].some((v) => v?.toLowerCase().includes(q))
+    );
+  }, [fields, query]);
+
+  const totalHa = useMemo(() => fields.reduce((sum, f) => sum + getAreaHa(f), 0), [fields]);
+
+  return (
+    <>
+      <style>{CSS}</style>
+      {isMobileOpen && <div className="ft-backdrop" onClick={onMobileClose} aria-hidden="true" />}
+
+      <aside className={`ft-side${isMobileOpen ? ' open' : ''}`} aria-label="Parcel manager">
+        <header className="ft-head">
+          <div>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: '10px', marginBottom: '4px' }}>
+              <h1 style={{ margin: 0, fontSize: '21px', fontWeight: 700, letterSpacing: '-0.3px' }}>FarmTrack</h1>
+              <span style={{
+                fontSize: '10px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
+                color: t.sage, backgroundColor: t.sageSoft, padding: '2px 7px', borderRadius: '4px',
+              }}>
+                Field Ops
+              </span>
+            </div>
+            <p style={{ margin: 0, fontSize: '12.5px', color: t.inkSoft, lineHeight: 1.5 }}>
+              Plot parcels, register crops, manage land records.
+            </p>
+          </div>
+          <button type="button" className="ft-close" onClick={onMobileClose} aria-label="Close sidebar">✕</button>
+        </header>
+
+        <div className="ft-body">
+          <button type="button" onClick={onLocateClick} disabled={locating} className="ft-btn"
+            style={{ width: '100%', backgroundColor: t.ink, color: '#fff', padding: '13px 16px', fontSize: '13.5px' }}>
+            <span aria-hidden="true">⌖</span> {locating ? 'Locating…' : 'Locate me via GPS'}
+          </button>
+
+          {selectedField && (
+            <PlotEditor
+              key={selectedField.id ?? selectedField.draftKey}
+              field={selectedField}
+              saving={saving}
+              onSave={onSaveField}
+              onCancel={onCancel}
+              onDelete={onDeleteField}
+            />
+          )}
+
+          <section style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+              <h2 style={sectionTitle}>Logged parcels</h2>
+              <span style={{ fontSize: '12px', color: t.inkSoft, fontVariantNumeric: 'tabular-nums' }}>
+                {dbLoading ? '···' : `${fields.length} · ${formatHa(totalHa)}`}
+              </span>
+            </div>
+
+            {fields.length > 0 && (
+              <>
+                <input
+                  type="search"
+                  className="ft-input"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Filter by owner, code, crop or notes"
+                  aria-label="Filter parcels"
+                />
+                <div style={{ display: 'flex', gap: '14px' }}>
+                  <button type="button" className="ft-link" onClick={() => exportCSV(visible)}>⬇ Export CSV</button>
+                  <button type="button" className="ft-link" onClick={() => exportGeoJSON(visible)}>⬇ Export GeoJSON</button>
+                </div>
+              </>
+            )}
+
+            {dbLoading ? (
+              <p style={{ margin: 0, fontSize: '12.5px', color: t.inkSoft }}>Loading your parcels…</p>
+            ) : fields.length === 0 ? (
+              <div style={{ padding: '32px 16px', border: `1.5px dashed ${t.hairline}`, borderRadius: '10px', textAlign: 'center' }}>
+                <p style={{ margin: 0, fontSize: '12.5px', color: t.inkSoft, lineHeight: 1.5 }}>
+                  No plots logged yet.<br />Click the map to start drawing a boundary.
+                </p>
+              </div>
+            ) : visible.length === 0 ? (
+              <p style={{ margin: 0, fontSize: '12.5px', color: t.inkSoft }}>No parcels match “{query}”.</p>
+            ) : (
+              <div>
+                {visible.map((f) => (
+                  <div
+                    key={f.id}
+                    role="button"
+                    tabIndex={0}
+                    className={`ft-row${selectedField?.id === f.id ? ' on' : ''}`}
+                    onClick={() => onFlyToField(f)}
+                    onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget) return;
+                      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onFlyToField(f); }
+                    }}
+                  >
+                    <span style={{
+                      width: '30px', height: '30px', borderRadius: '8px', flexShrink: 0, fontSize: '15px',
+                      backgroundColor: f.crop === 'Unassigned' ? t.bg : t.sageSoft,
+                      border: f.crop === 'Unassigned' ? `1px dashed ${t.hairline}` : 'none',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      {getCropIcon(f.crop)}
+                    </span>
+
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: '13.5px', fontWeight: 600 }}>{f.crop}</div>
+                      {f.ownerName && (
+                        <div style={{ fontSize: '11px', color: t.sage, fontWeight: 500, marginTop: '1px' }}>
+                          👤 {f.ownerName}
+                        </div>
+                      )}
+                      {f.farmerCode && (
+                        <div style={{ fontSize: '11px', color: t.inkSoft, fontFamily: 'monospace', marginTop: '1px' }}>
+                          <span style={{
+                            fontSize: '9px', fontWeight: 700, letterSpacing: '0.05em', color: t.amber,
+                            backgroundColor: '#FEF3C7', padding: '1px 4px', borderRadius: '3px',
+                            fontFamily: 'sans-serif', marginRight: '4px',
+                          }}>
+                            ID
+                          </span>
+                          {f.farmerCode}
+                        </div>
+                      )}
+                      {f.notes && (
+                        <div style={{
+                          fontSize: '11.5px', color: t.inkSoft, overflow: 'hidden',
+                          textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: '1px',
+                        }}>
+                          {f.notes}
+                        </div>
+                      )}
+                    </div>
+
+                    <span style={{ fontSize: '12.5px', fontWeight: 600, color: t.inkSoft, flexShrink: 0 }}>
+                      {formatHa(getAreaHa(f))}
+                    </span>
+
+                    <button
+                      type="button"
+                      className="ft-x"
+                      aria-label={`Delete parcel ${f.farmerCode || f.crop}`}
+                      onClick={(e) => { e.stopPropagation(); onDeleteField(f.id); }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <footer style={{
+            marginTop: 'auto', paddingTop: '14px', borderTop: `1px solid ${t.hairline}`,
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px',
+          }}>
+            <span style={{
+              fontSize: '11.5px', color: t.inkSoft, overflow: 'hidden',
+              textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              {userEmail}
+            </span>
+            <button type="button" className="ft-link" onClick={onSignOut}>Sign out</button>
+          </footer>
+        </div>
+      </aside>
+    </>
+  );
+}
