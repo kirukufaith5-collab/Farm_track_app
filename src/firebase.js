@@ -20,8 +20,10 @@ const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 
 export const db = initializeFirestore(app, {
-  // Picks WebSockets or long polling automatically, whichever works on this network
-  experimentalAutoDetectLongPolling: true,
+  // Plain HTTPS long polling with short cycles survives slow networks and proxies
+  // that cut long-lived connections
+  experimentalForceLongPolling: true,
+  experimentalLongPollingOptions: { timeoutSeconds: 10 },
   // Parcels stay available (and editable) with no signal in the field
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
 });
